@@ -55,7 +55,7 @@ public final class BackupEngine {
             note: note,
             onProgress: progress
         ) { chunk in
-            writeHandle.write(chunk)
+            try? writeHandle.write(contentsOf: chunk)
             totalWritten += Int64(chunk.count)
         }
 

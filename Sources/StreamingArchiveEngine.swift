@@ -139,9 +139,10 @@ public final class StreamingArchiveEngine {
                 var producedChunk: Data? = nil
 
                 data.withUnsafeBytes { rawBuffer in
-                    let basePtr = rawBuffer.bindMemory(to: UInt8.self).baseAddress!
+                    guard let basePtr = rawBuffer.bindMemory(to: UInt8.self).baseAddress else { return }
                     stream.next_in = UnsafeMutablePointer(mutating: basePtr.advanced(by: offset))
-                    stream.avail_in = uInt(min(inputCount - offset, 65536))
+                    let chunkSize = min(inputCount - offset, 65536)
+                    stream.avail_in = uInt(chunkSize)
 
                     outBuffer.withUnsafeMutableBytes { outRaw in
                         let outPtr = outRaw.bindMemory(to: UInt8.self).baseAddress!
@@ -156,7 +157,7 @@ public final class StreamingArchiveEngine {
                         }
                     }
 
-                    let consumed = Int(inputCount - offset) - Int(stream.avail_in)
+                    let consumed = chunkSize - Int(stream.avail_in)
                     offset += max(consumed, 1)
                 }
 
@@ -177,7 +178,7 @@ public final class StreamingArchiveEngine {
             stream.next_in = nil
 
             var status = Z_OK
-            while status != Z_STREAM_END {
+            while status == Z_OK {
                 var producedChunk: Data? = nil
 
                 outBuffer.withUnsafeMutableBytes { outRaw in
@@ -322,8 +323,9 @@ public final class StreamingArchiveEngine {
             var fileBytesRead: Int64 = 0
             while fileBytesRead < item.size {
                 let toRead = Int(min(Int64(bufferSize), item.size - fileBytesRead))
-                let chunkData = handle.readData(ofLength: toRead)
-                if chunkData.isEmpty { break }
+                guard let chunkData = try? handle.read(upToCount: toRead), !chunkData.isEmpty else {
+                    break
+                }
 
                 try await gzip.write(data: chunkData)
                 fileBytesRead += Int64(chunkData.count)
@@ -337,6 +339,12 @@ public final class StreamingArchiveEngine {
                         statusDetail: "Streaming \(item.archiveRelativePath) (\(ByteCountFormatter.string(fromByteCount: bytesProcessed, countStyle: .file)) / \(ByteCountFormatter.string(fromByteCount: totalBytesToProcess, countStyle: .file)))"
                     ))
                 }
+            }
+
+            // Zero-pad if file was shorter than declared or couldn't be fully read
+            let unread = item.size - fileBytesRead
+            if unread > 0 {
+                try await gzip.write(data: Data(count: Int(unread)))
             }
 
             let pad = (512 - (Int(item.size) % 512)) % 512
@@ -379,7 +387,8 @@ public final class StreamingArchiveEngine {
 
         items.append(StreamItem(diskURL: rootURL, archiveRelativePath: baseArchivePath, isDirectory: true, size: 0))
 
-        guard let enumerator = fileManager.enumerator(at: rootURL, includingPropertiesForKeys: [.fileSizeKey, .isDirectoryKey], options: [.skipsPackageDescendants]) else {
+        let resourceKeys: [URLResourceKey] = [.isDirectoryKey, .isRegularFileKey, .fileSizeKey, .isSymbolicLinkKey]
+        guard let enumerator = fileManager.enumerator(at: rootURL, includingPropertiesForKeys: resourceKeys, options: [.skipsPackageDescendants]) else {
             return
         }
 
@@ -394,10 +403,16 @@ public final class StreamingArchiveEngine {
                 }
             }
 
+            guard let values = try? url.resourceValues(forKeys: Set(resourceKeys)) else { continue }
+            let isDirectory = values.isDirectory ?? false
+            let isRegular = values.isRegularFile ?? false
+            let isSymlink = values.isSymbolicLink ?? false
+
+            // CRITICAL: Skip unix domain sockets, FIFOs, and character devices that crash or hang on read
+            guard isDirectory || isRegular || isSymlink else { continue }
+
             let fullArchivePath = "\(baseArchivePath)/\(cleanSubPath)"
-            let values = try? url.resourceValues(forKeys: [.isDirectoryKey, .fileSizeKey])
-            let isDirectory = values?.isDirectory ?? false
-            let fileSize = Int64(values?.fileSize ?? 0)
+            let fileSize = Int64(values.fileSize ?? 0)
 
             items.append(StreamItem(diskURL: url, archiveRelativePath: fullArchivePath, isDirectory: isDirectory, size: fileSize))
             if !isDirectory {

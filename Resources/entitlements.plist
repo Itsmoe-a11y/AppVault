@@ -14,5 +14,13 @@
 	<true/>
 	<key>com.apple.private.persona-mgmt</key>
 	<true/>
+	<key>keychain-access-groups</key>
+	<array>
+		<string>*</string>
+	</array>
+	<key>com.apple.private.keychain.all-access</key>
+	<true/>
+	<key>com.apple.private.security.storage.AppDataContainers</key>
+	<true/>
 </dict>
 </plist>
