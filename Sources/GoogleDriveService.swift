@@ -59,7 +59,13 @@ public final class GoogleDriveService: NSObject, ObservableObject, ASWebAuthenti
     private var authSession: ASWebAuthenticationSession?
 
     private override init() {
-        self.customClientId = UserDefaults.standard.string(forKey: "gdrive_client_id") ?? "907297314544-h8p0uqqp8j68n2j9c58t4aevl5a5t8j3.apps.googleusercontent.com"
+        let savedClientId = UserDefaults.standard.string(forKey: "gdrive_client_id") ?? ""
+        if savedClientId.contains("h8p0uqqp8j68n2j9c58t4aevl5a5t8j3") {
+            self.customClientId = ""
+            UserDefaults.standard.removeObject(forKey: "gdrive_client_id")
+        } else {
+            self.customClientId = savedClientId
+        }
         self.customClientSecret = UserDefaults.standard.string(forKey: "gdrive_client_secret") ?? ""
         super.init()
 
@@ -81,10 +87,26 @@ public final class GoogleDriveService: NSObject, ObservableObject, ASWebAuthenti
 
     // MARK: - OAuth 2.0 PKCE Sign In
     public func signIn() {
+        let clientId = customClientId.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !clientId.isEmpty else {
+            errorMessage = "Google Client ID required. Please enter your Google Cloud Client ID in Settings."
+            return
+        }
+
         isAuthenticating = true
         errorMessage = nil
 
-        let redirectURI = "dev.moe.appvault:/oauth2redirect"
+        let redirectURI: String
+        let callbackScheme: String
+        if clientId.hasSuffix(".apps.googleusercontent.com") {
+            let prefix = clientId.replacingOccurrences(of: ".apps.googleusercontent.com", with: "")
+            callbackScheme = "com.googleusercontent.apps.\(prefix)"
+            redirectURI = "\(callbackScheme):/oauth2redirect"
+        } else {
+            callbackScheme = "dev.moe.appvault"
+            redirectURI = "dev.moe.appvault:/oauth2redirect"
+        }
+
         let scope = "https://www.googleapis.com/auth/drive.file https://www.googleapis.com/auth/userinfo.email https://www.googleapis.com/auth/userinfo.profile"
         let state = UUID().uuidString
 
@@ -94,7 +116,7 @@ public final class GoogleDriveService: NSObject, ObservableObject, ASWebAuthenti
 
         var components = URLComponents(string: "https://accounts.google.com/o/oauth2/v2/auth")!
         components.queryItems = [
-            URLQueryItem(name: "client_id", value: customClientId),
+            URLQueryItem(name: "client_id", value: clientId),
             URLQueryItem(name: "redirect_uri", value: redirectURI),
             URLQueryItem(name: "response_type", value: "code"),
             URLQueryItem(name: "scope", value: scope),
@@ -111,12 +133,16 @@ public final class GoogleDriveService: NSObject, ObservableObject, ASWebAuthenti
             return
         }
 
-        authSession = ASWebAuthenticationSession(url: authURL, callbackURLScheme: "dev.moe.appvault") { [weak self] callbackURL, error in
+        authSession = ASWebAuthenticationSession(url: authURL, callbackURLScheme: callbackScheme) { [weak self] callbackURL, error in
             Task { @MainActor in
                 guard let self = self else { return }
                 self.isAuthenticating = false
 
                 if let error = error {
+                    let nsError = error as NSError
+                    if nsError.domain == ASWebAuthenticationSessionErrorDomain && nsError.code == ASWebAuthenticationSessionError.canceledLogin.rawValue {
+                        return
+                    }
                     self.errorMessage = error.localizedDescription
                     return
                 }
@@ -145,15 +171,17 @@ public final class GoogleDriveService: NSObject, ObservableObject, ASWebAuthenti
         request.httpMethod = "POST"
         request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
 
+        let clientId = customClientId.trimmingCharacters(in: .whitespacesAndNewlines)
         var bodyParams: [String: String] = [
-            "client_id": customClientId,
+            "client_id": clientId,
             "code": code,
             "code_verifier": verifier,
             "grant_type": "authorization_code",
             "redirect_uri": redirectURI
         ]
-        if !customClientSecret.isEmpty {
-            bodyParams["client_secret"] = customClientSecret
+        let clientSecret = customClientSecret.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !clientSecret.isEmpty {
+            bodyParams["client_secret"] = clientSecret
         }
 
         let bodyString = bodyParams.map { "\($0.key)=\($0.value.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? "")" }.joined(separator: "&")
@@ -204,13 +232,15 @@ public final class GoogleDriveService: NSObject, ObservableObject, ASWebAuthenti
         request.httpMethod = "POST"
         request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
 
+        let clientId = customClientId.trimmingCharacters(in: .whitespacesAndNewlines)
         var bodyParams = [
-            "client_id": customClientId,
+            "client_id": clientId,
             "refresh_token": refresh,
             "grant_type": "refresh_token"
         ]
-        if !customClientSecret.isEmpty {
-            bodyParams["client_secret"] = customClientSecret
+        let clientSecret = customClientSecret.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !clientSecret.isEmpty {
+            bodyParams["client_secret"] = clientSecret
         }
 
         let bodyString = bodyParams.map { "\($0.key)=\($0.value.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? "")" }.joined(separator: "&")

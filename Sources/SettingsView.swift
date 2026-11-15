@@ -6,6 +6,7 @@ public struct SettingsView: View {
     @ObservedObject var webServer = LocalWebServer.shared
     @ObservedObject var webdav = WebDAVService.shared
     @State private var showAdvancedOAuth = false
+    @State private var showGoogleGuide = false
 
     public init() {}
 
@@ -69,15 +70,67 @@ public struct SettingsView: View {
                                 .foregroundColor(.red)
                         }
                     } else {
-                        VStack(alignment: .leading, spacing: 8) {
-                            Text("Connect your Google Drive account to stream backups directly into the cloud. This avoids using any device storage during backup.")
+                        VStack(alignment: .leading, spacing: 10) {
+                            Text("Stream backups directly into your personal Google Drive with 0 MB device storage used.")
                                 .font(.caption)
                                 .foregroundColor(.secondary)
 
-                            Button(action: { googleDrive.signIn() }) {
+                            if let error = googleDrive.errorMessage {
+                                HStack(alignment: .top, spacing: 8) {
+                                    Image(systemName: "exclamationmark.triangle.fill")
+                                        .foregroundColor(.orange)
+                                    Text(error)
+                                        .font(.caption)
+                                        .foregroundColor(.red)
+                                    Spacer()
+                                    Button(action: { googleDrive.errorMessage = nil }) {
+                                        Image(systemName: "xmark.circle.fill")
+                                            .font(.caption)
+                                            .foregroundColor(.secondary)
+                                    }
+                                }
+                                .padding(8)
+                                .background(Color.red.opacity(0.1))
+                                .cornerRadius(8)
+                            }
+
+                            VStack(alignment: .leading, spacing: 6) {
                                 HStack {
-                                    Image(systemName: "link.badge.plus")
-                                    Text("Sign In with Google")
+                                    Text("OAuth 2.0 Client ID")
+                                        .font(.caption)
+                                        .foregroundColor(.secondary)
+                                    Spacer()
+                                    Button(action: { showGoogleGuide = true }) {
+                                        Label("Setup Guide", systemImage: "questionmark.circle")
+                                            .font(.caption)
+                                            .foregroundColor(.blue)
+                                    }
+                                }
+
+                                TextField("xxxxxx.apps.googleusercontent.com", text: $googleDrive.customClientId)
+                                    .font(.system(size: 13, design: .monospaced))
+                                    .autocapitalization(.none)
+                                    .disableAutocorrection(true)
+                                    .padding(8)
+                                    .background(Color(UIColor.secondarySystemBackground))
+                                    .cornerRadius(6)
+                            }
+
+                            Button(action: {
+                                if googleDrive.customClientId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                                    showGoogleGuide = true
+                                } else {
+                                    googleDrive.signIn()
+                                }
+                            }) {
+                                HStack {
+                                    if googleDrive.isAuthenticating {
+                                        ProgressView()
+                                            .progressViewStyle(CircularProgressViewStyle(tint: .white))
+                                    } else {
+                                        Image(systemName: "link.badge.plus")
+                                    }
+                                    Text(googleDrive.customClientId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "Setup Google Client ID (2 min)" : "Sign In with Google")
                                 }
                                 .font(.headline)
                                 .foregroundColor(.white)
@@ -86,25 +139,23 @@ public struct SettingsView: View {
                                 .background(Color.blue)
                                 .cornerRadius(8)
                             }
-                            .padding(.vertical, 4)
+                            .padding(.vertical, 2)
                         }
                     }
 
-                    DisclosureGroup("Advanced OAuth 2.0 Credentials", isExpanded: $showAdvancedOAuth) {
-                        VStack(alignment: .leading, spacing: 10) {
-                            Text("Optionally provide your own Google Cloud Console Client ID & Secret for personal API quotas.")
+                    DisclosureGroup("Advanced OAuth Settings (Optional)", isExpanded: $showAdvancedOAuth) {
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text("Client Secret is optional for iOS PKCE clients. Only provide if you created a Web Application client.")
                                 .font(.caption2)
                                 .foregroundColor(.secondary)
 
-                            TextField("Client ID", text: $googleDrive.customClientId)
+                            SecureField("Client Secret (Optional)", text: $googleDrive.customClientSecret)
                                 .font(.system(size: 12, design: .monospaced))
                                 .autocapitalization(.none)
                                 .disableAutocorrection(true)
-
-                            SecureField("Client Secret (optional)", text: $googleDrive.customClientSecret)
-                                .font(.system(size: 12, design: .monospaced))
-                                .autocapitalization(.none)
-                                .disableAutocorrection(true)
+                                .padding(6)
+                                .background(Color(UIColor.secondarySystemBackground))
+                                .cornerRadius(6)
                         }
                         .padding(.vertical, 4)
                     }
@@ -205,7 +256,7 @@ public struct SettingsView: View {
                     HStack {
                         Text("App Version")
                         Spacer()
-                        Text("2.0.0 (Ultimate Edition)")
+                        Text("2.0.1 (Ultimate Edition)")
                             .foregroundColor(.secondary)
                     }
 
@@ -235,5 +286,205 @@ public struct SettingsView: View {
             }
         }
         .navigationViewStyle(StackNavigationViewStyle())
+        .sheet(isPresented: $showGoogleGuide) {
+            GoogleSetupGuideSheet()
+        }
+    }
+}
+
+// MARK: - Google OAuth 2.0 Setup Guide Sheet
+public struct GoogleSetupGuideSheet: View {
+    @Environment(\.presentationMode) var presentationMode
+    @ObservedObject var googleDrive = GoogleDriveService.shared
+    @State private var copiedBundleId: Bool = false
+    @State private var clientIdInput: String = ""
+
+    public var body: some View {
+        NavigationView {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 20) {
+                    // Header Card
+                    VStack(alignment: .leading, spacing: 8) {
+                        HStack(spacing: 12) {
+                            Image(systemName: "icloud.and.arrow.up.fill")
+                                .font(.system(size: 32))
+                                .foregroundColor(.blue)
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("Google Cloud Setup")
+                                    .font(.system(size: 20, weight: .bold))
+                                Text("Free personal OAuth 2.0 Client ID (2 min)")
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                            }
+                        }
+
+                        Text("Google requires third-party iOS apps to use a registered OAuth Client ID. You can generate your own free Client ID in Google Cloud Console.")
+                            .font(.subheadline)
+                            .foregroundColor(.secondary)
+                    }
+                    .padding()
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(Color(UIColor.secondarySystemBackground))
+                    .cornerRadius(12)
+
+                    // Bundle Identifier Card
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("App Bundle Identifier:")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+
+                        HStack {
+                            Text("dev.moe.appvault")
+                                .font(.system(size: 15, weight: .bold, design: .monospaced))
+                                .foregroundColor(.primary)
+
+                            Spacer()
+
+                            Button(action: {
+                                UIPasteboard.general.string = "dev.moe.appvault"
+                                copiedBundleId = true
+                                DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
+                                    copiedBundleId = false
+                                }
+                            }) {
+                                HStack(spacing: 4) {
+                                    Image(systemName: copiedBundleId ? "checkmark" : "doc.on.doc")
+                                    Text(copiedBundleId ? "Copied!" : "Copy")
+                                }
+                                .font(.system(size: 12, weight: .bold))
+                                .padding(.horizontal, 10)
+                                .padding(.vertical, 6)
+                                .background(copiedBundleId ? Color.green : Color.blue)
+                                .foregroundColor(.white)
+                                .cornerRadius(6)
+                            }
+                        }
+                    }
+                    .padding()
+                    .background(Color(UIColor.secondarySystemBackground))
+                    .cornerRadius(12)
+
+                    // Numbered Steps
+                    VStack(alignment: .leading, spacing: 16) {
+                        guideStep(
+                            number: "1",
+                            title: "Open Google Cloud Console",
+                            detail: "Go to console.cloud.google.com on your PC or phone and sign in with your Google account."
+                        )
+
+                        guideStep(
+                            number: "2",
+                            title: "Create Project & Enable Drive API",
+                            detail: "Create a new project (e.g. 'AppVault'). In the top search bar, search for 'Google Drive API' and click 'Enable'."
+                        )
+
+                        guideStep(
+                            number: "3",
+                            title: "Configure OAuth Consent Screen",
+                            detail: "Go to 'APIs & Services' > 'OAuth consent screen'. Choose 'External'. Fill in the App Name ('AppVault') and your email. In Scopes, add '.../auth/drive.file'. Under 'Test users', add your Google email."
+                        )
+
+                        guideStep(
+                            number: "4",
+                            title: "Create iOS Client ID",
+                            detail: "Go to 'APIs & Services' > 'Credentials' > 'Create Credentials' > 'OAuth client ID'. Select 'iOS' as Application Type. Enter 'dev.moe.appvault' as the Bundle ID."
+                        )
+
+                        guideStep(
+                            number: "5",
+                            title: "Paste Client ID Below",
+                            detail: "Copy the generated Client ID (looks like xxxx.apps.googleusercontent.com) and paste it into the field below."
+                        )
+                    }
+
+                    // Input Box
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Paste your Client ID here:")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+
+                        TextField("xxxxxx.apps.googleusercontent.com", text: $clientIdInput)
+                            .font(.system(size: 13, design: .monospaced))
+                            .autocapitalization(.none)
+                            .disableAutocorrection(true)
+                            .padding(10)
+                            .background(Color(UIColor.secondarySystemBackground))
+                            .cornerRadius(8)
+
+                        Button(action: {
+                            let trimmed = clientIdInput.trimmingCharacters(in: .whitespacesAndNewlines)
+                            if !trimmed.isEmpty {
+                                googleDrive.customClientId = trimmed
+                                presentationMode.wrappedValue.dismiss()
+                                googleDrive.signIn()
+                            }
+                        }) {
+                            Text("Save & Sign In with Google")
+                                .font(.headline)
+                                .foregroundColor(.white)
+                                .frame(maxWidth: .infinity)
+                                .padding(.vertical, 12)
+                                .background(clientIdInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? Color.gray : Color.blue)
+                                .cornerRadius(8)
+                        }
+                        .disabled(clientIdInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    }
+                    .padding()
+                    .background(Color(UIColor.secondarySystemBackground).opacity(0.6))
+                    .cornerRadius(12)
+
+                    // Alternative Note
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("💡 Zero-Setup Alternative:")
+                            .font(.system(size: 14, weight: .bold))
+                            .foregroundColor(.primary)
+
+                        Text("If you prefer not setting up Google Cloud, use AppVault's built-in Local Wi-Fi Browser Transfer (port 8080) to download backups straight to your PC browser, or use WebDAV / Nextcloud.")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                    .padding()
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(Color.blue.opacity(0.1))
+                    .cornerRadius(12)
+                }
+                .padding()
+            }
+            .navigationTitle("Google Drive Setup")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    Button("Done") {
+                        presentationMode.wrappedValue.dismiss()
+                    }
+                }
+            }
+            .onAppear {
+                clientIdInput = googleDrive.customClientId
+            }
+        }
+        .navigationViewStyle(StackNavigationViewStyle())
+    }
+
+    private func guideStep(number: String, title: String, detail: String) -> some View {
+        HStack(alignment: .top, spacing: 14) {
+            ZStack {
+                Circle()
+                    .fill(Color.blue)
+                    .frame(width: 28, height: 28)
+                Text(number)
+                    .font(.system(size: 14, weight: .bold))
+                    .foregroundColor(.white)
+            }
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text(title)
+                    .font(.system(size: 15, weight: .bold))
+                    .foregroundColor(.primary)
+                Text(detail)
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+        }
     }
 }
