@@ -18,7 +18,7 @@ public struct BackupsListView: View {
                                 .scaleEffect(0.8)
                             Text(progress.stage)
                                 .font(.subheadline)
-                                .bold()
+                                .fontWeight(.bold)
                             Spacer()
                             Text("\(Int(progress.fractionCompleted * 100))%")
                                 .font(.caption)
@@ -209,7 +209,7 @@ struct BackupCardView: View {
 
                 Text(record.formattedSize)
                     .font(.caption2)
-                    .bold()
+                    .fontWeight(.bold)
                     .foregroundColor(.secondary)
             }
 
@@ -220,7 +220,7 @@ struct BackupCardView: View {
                 Button(action: onRestore) {
                     Label("Restore", systemImage: "arrow.counterclockwise.circle.fill")
                         .font(.subheadline)
-                        .bold()
+                        .fontWeight(.bold)
                         .foregroundColor(.green)
                 }
                 .buttonStyle(BorderlessButtonStyle())

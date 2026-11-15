@@ -144,7 +144,7 @@ struct AppRowView: View {
             Button(action: onBackupTap) {
                 Text("Backup")
                     .font(.subheadline)
-                    .bold()
+                    .fontWeight(.bold)
                     .padding(.horizontal, 14)
                     .padding(.vertical, 6)
                     .background(Color.blue)

@@ -42,7 +42,7 @@ else
     SWIFT_FILES=$(find "$ROOT_DIR/Sources" -name "*.swift")
 
     swiftc \
-        -target arm64-apple-ios14.0 \
+        -target arm64-apple-ios15.0 \
         -sdk "$SDK_PATH" \
         -O \
         -import-objc-header /dev/null 2>/dev/null || true \

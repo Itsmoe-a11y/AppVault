@@ -86,7 +86,7 @@ public final class RestoreEngine {
         ))
 
         let installedApps = AppDiscoveryService.shared.fetchInstalledApps()
-        var targetApp = installedApps.first(where: { $0.bundleIdentifier == record.bundleIdentifier })
+        let targetApp = installedApps.first(where: { $0.bundleIdentifier == record.bundleIdentifier })
 
         // Check if app bundle needs to be installed first
         if targetApp == nil {

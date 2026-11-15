@@ -93,7 +93,7 @@ public struct BackupDetailSheet: View {
                             HStack {
                                 Text(progress.stage)
                                     .font(.subheadline)
-                                    .bold()
+                                    .fontWeight(.bold)
                                 Spacer()
                                 Text("\(Int(progress.fractionCompleted * 100))%")
                                     .font(.caption)
