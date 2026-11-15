@@ -678,6 +678,7 @@ struct PlistEditorView: View {
                 editSheet(for: row)
             }
         }
+        .navigationViewStyle(StackNavigationViewStyle())
     }
 
     private var filteredRows: [PlistDisplayRow] {
@@ -778,6 +779,7 @@ struct PlistEditorView: View {
                 }
             }
         }
+        .navigationViewStyle(StackNavigationViewStyle())
     }
 
     private func applyEdit(row: PlistDisplayRow, newText: String) {
@@ -1053,6 +1055,7 @@ struct SQLiteInspectorView: View {
             }
             .onAppear { loadDatabase() }
         }
+        .navigationViewStyle(StackNavigationViewStyle())
     }
 
     private var filteredTableRows: [[String]] {

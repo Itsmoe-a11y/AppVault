@@ -135,22 +135,19 @@ public final class AppsViewModel: ObservableObject {
                 }
             }
 
-            // Calculate storage sizes in background without blocking UI
-            for app in discovered {
+            // Calculate storage sizes in background in a local copy, then update atomically
+            var sizedApps = discovered
+            for i in 0..<sizedApps.count {
                 guard !Task.isCancelled else { break }
-                let sizes = AppDiscoveryService.shared.calculateAppSizes(for: app)
-                guard !Task.isCancelled else { break }
-
-                await MainActor.run {
-                    if let index = self.apps.firstIndex(where: { $0.bundleIdentifier == app.bundleIdentifier }) {
-                        self.apps[index].appSizeBytes = sizes.appSize
-                        self.apps[index].dataSizeBytes = sizes.dataSize
-                        self.apps[index].groupSizeBytes = sizes.groupSize
-                    }
-                }
+                let sizes = AppDiscoveryService.shared.calculateAppSizes(for: sizedApps[i])
+                sizedApps[i].appSizeBytes = sizes.appSize
+                sizedApps[i].dataSizeBytes = sizes.dataSize
+                sizedApps[i].groupSizeBytes = sizes.groupSize
             }
 
+            guard !Task.isCancelled else { return }
             await MainActor.run {
+                self.apps = sizedApps
                 self.isScanning = false
             }
         }

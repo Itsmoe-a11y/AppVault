@@ -14,10 +14,10 @@ on:
         type: boolean
         default: true
       release_tag:
-        description: 'Release Tag (defaults to v2.1.0)'
+        description: 'Release Tag (defaults to v2.1.1)'
         required: false
         type: string
-        default: 'v2.1.0'
+        default: 'v2.1.1'
 
 permissions:
   contents: write
@@ -86,24 +86,21 @@ jobs:
         if: ${{ github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && github.event.inputs.upload_release == 'true') }}
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ github.event.inputs.release_tag || 'v2.1.0' }}
-          name: "AppVault ${{ github.event.inputs.release_tag || 'v2.1.0' }}"
+          tag_name: ${{ github.event.inputs.release_tag || 'v2.1.1' }}
+          name: "AppVault ${{ github.event.inputs.release_tag || 'v2.1.1' }}"
           body: |
-            ## AppVault v2.1.0 - Professional Production Edition
+            ## AppVault v2.1.1 - iOS 16 Hardening & Stability Release
 
             AppVault is an unsandboxed application for **TrollStore** and **jailbroken** iOS devices (iOS 15.0 - 17.0+).
 
-            ### Core Architectural & Runtime Hardening in v2.1.0:
-            1. 📦 **POSIX UStar & GNU Long Link Engine**: Full 155-byte prefix + 100-byte name boundary split algorithm with GNU Long Link (`././@LongLink`) support for paths > 255 bytes. State machine `TarExtractor` with checksum verification and Tar Slip traversal guards.
-            2. ⚡ **Hardened zlib Streaming**: Zero-data-loss deflation and inflation engines with complete zlib return code validation (`Z_OK`, `Z_STREAM_END`, `Z_BUF_ERROR`, `Z_DATA_ERROR`, `Z_STREAM_ERROR`) and deinit cleanup.
-            3. 🛡️ **IPC Socket & FIFO Safety**: Strict `lstat` mode verification (`S_IFMT`) bypassing Unix domain sockets, FIFOs, and character devices that previously caused watchdog termination.
-            4. 🔗 **Native Symlink Archiving**: Broken and intact symlinks are recorded via `readlink` into Tar linkname without opening file handles, and restored natively via `symlink`.
-            5. 🔑 **Two-Pass Keychain Extraction**: Non-blocking `kSecUseAuthenticationUISkip` pass prevents biometric prompts/hangs; duplicate resolution via `SecItemUpdate` and entitlement recovery.
-            6. 🔒 **Hardened Cryptography**: CSPRNG salt verification, 100,000 PBKDF2-SHA256 iterations, AES-256-GCM authenticated tags, and sensitive key buffer memory wiping (`memset_s`).
-            7. 🌐 **Zero-RAM Wi-Fi Web Server**: Defense-in-depth path traversal prevention, 128 KB chunked streaming downloads, streaming multipart uploads, and 64 KB header limits.
-            8. ☁️ **Resilient Cloud Storage**: RFC 7636 PKCE code challenge, Google Drive Resumable Upload 308 range inspection & 401 token refresh retries, and RFC 4918 WebDAV PROPFIND XML parser.
-            9. 🔍 **Data Explorer & SQLite3 C-API**: Bulletproof handle & statement cleanups with `sqlite3_close_v2`, table name sanitization, type-safe column decoding, and atomic format-preserving Plist editor with type badges.
-            10. 🎯 **UI & Concurrency Stability**: Unified sheet presentation, non-blocking background directory calculations, resilient batch backup queue with per-app error logging, and POSIX-verified backup rename & delete.
+            ### Highlights & Critical Fixes in v2.1.1:
+            1. 📱 **iOS 16 Modal Presentation Fix**: Added explicit `StackNavigationViewStyle()` to `NavigationView` across `BackupDetailSheet`, `BatchBackupSheet`, `SelectiveRestoreSheet`, `DataExplorerView`, and `BackupsListView`. Prevents split-view controller assertion crashes on iOS 16.
+            2. 🎯 **Crash-Proof Backup Type Picker**: Replaced composite `HStack` inside `SegmentedPickerStyle` with native `Text` tags and dedicated explanation cards. Resolves the issue where backup modes were unselectable on iOS 16.
+            3. 🎛️ **Granular Component Selection**: Added toggles for **Include Keychain & Logins**, **Include Shared App Groups**, and **Include Caches & Temp Files** directly in the backup configuration sheet.
+            4. 💬 **WhatsApp & App Store Container Resolution**: Added case-insensitive and normalized bundle ID matching (`net.whatsapp.WhatsApp`, `group.net.whatsapp.WhatsApp.shared`). App row and detail sheets now accurately display combined container and shared group sizes.
+            5. 🛡️ **OOM / Jetsam Prevention**: Replaced unbounded single-buffer zero-padding with chunked 64 KB writes during streaming archive creation, preventing memory spikes when handling multi-gigabyte databases or video files.
+            6. ⚠️ **Zero-Collision Sheet Architecture**: Self-contained execution lifecycle within `BackupDetailSheet` with inline progress, error callouts, and success confirmation, eliminating cross-tab modal alert collisions.
+            7. 🚀 **Smooth Background Scanning**: Off-thread batch size calculations with atomic state publishing, preventing UI thrashing and presentation transition interruptions.
 
             ### Installation:
             - **TrollStore**: Download `AppVault.tipa` (or `AppVault.ipa`) and open in TrollStore.

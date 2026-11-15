@@ -82,6 +82,10 @@ public final class AppDiscoveryService {
                    let dict = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any],
                    let identifier = dict["MCMMetadataIdentifier"] as? String {
                     maps.dataContainers[identifier] = dir
+                    maps.dataContainers[identifier.lowercased()] = dir
+                    let clean = cleanIdentifier(identifier)
+                    maps.dataContainers[clean] = dir
+                    maps.dataContainers[clean.lowercased()] = dir
                 }
             }
         }
@@ -97,6 +101,10 @@ public final class AppDiscoveryService {
                        let dict = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any],
                        let identifier = dict["MCMMetadataIdentifier"] as? String {
                         maps.bundleContainers[identifier] = appBundle
+                        maps.bundleContainers[identifier.lowercased()] = appBundle
+                        let clean = cleanIdentifier(identifier)
+                        maps.bundleContainers[clean] = appBundle
+                        maps.bundleContainers[clean.lowercased()] = appBundle
                     } else {
                         // Fallback: parse Info.plist inside the .app bundle
                         let infoPlist = appBundle.appendingPathComponent("Info.plist")
@@ -104,6 +112,10 @@ public final class AppDiscoveryService {
                            let pDict = try? PropertyListSerialization.propertyList(from: pData, format: nil) as? [String: Any],
                            let bId = pDict["CFBundleIdentifier"] as? String {
                             maps.bundleContainers[bId] = appBundle
+                            maps.bundleContainers[bId.lowercased()] = appBundle
+                            let clean = cleanIdentifier(bId)
+                            maps.bundleContainers[clean] = appBundle
+                            maps.bundleContainers[clean.lowercased()] = appBundle
                         }
                     }
                 }
@@ -119,6 +131,10 @@ public final class AppDiscoveryService {
                    let dict = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any],
                    let identifier = dict["MCMMetadataIdentifier"] as? String {
                     maps.groupContainers[identifier] = dir
+                    maps.groupContainers[identifier.lowercased()] = dir
+                    let clean = cleanIdentifier(identifier)
+                    maps.groupContainers[clean] = dir
+                    maps.groupContainers[clean.lowercased()] = dir
                 }
             }
         }
@@ -233,7 +249,9 @@ public final class AppDiscoveryService {
                 if let data = try? Data(contentsOf: fileURL) {
                     let groupIDs = extractAppGroupsFromProvisionOrEntitlements(data: data)
                     for gid in groupIDs {
-                        if let gURL = containerMaps.groupContainers[gid] {
+                        if let gURL = containerMaps.groupContainers[gid] ??
+                                      containerMaps.groupContainers[gid.lowercased()] ??
+                                      containerMaps.groupContainers[cleanIdentifier(gid).lowercased()] {
                             groups[gid] = gURL
                         }
                     }
@@ -291,9 +309,16 @@ public final class AppDiscoveryService {
             let shortVersion = stringProperty(proxy, selectorName: "shortVersionString") ?? "1.0"
             let buildVersion = stringProperty(proxy, selectorName: "bundleVersion") ?? "1"
 
-            // URLs with filesystem metadata fallback
-            let bundleURL = urlProperty(proxy, selectorName: "bundleURL") ?? containerMaps.bundleContainers[bundleID]
-            let dataContainerURL = urlProperty(proxy, selectorName: "dataContainerURL") ?? containerMaps.dataContainers[bundleID]
+            // URLs with filesystem metadata fallback (case-insensitive & clean bundleID support)
+            let bundleURL = urlProperty(proxy, selectorName: "bundleURL") ??
+                            containerMaps.bundleContainers[bundleID] ??
+                            containerMaps.bundleContainers[bundleID.lowercased()] ??
+                            containerMaps.bundleContainers[cleanIdentifier(bundleID).lowercased()]
+
+            let dataContainerURL = urlProperty(proxy, selectorName: "dataContainerURL") ??
+                                   containerMaps.dataContainers[bundleID] ??
+                                   containerMaps.dataContainers[bundleID.lowercased()] ??
+                                   containerMaps.dataContainers[cleanIdentifier(bundleID).lowercased()]
 
             // Group Containers: merge workspace groups with filesystem groupContainers matching app bundleID
             let initialGroups = groupContainersProperty(proxy)

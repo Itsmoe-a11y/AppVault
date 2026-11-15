@@ -9,18 +9,30 @@ public final class BackupEngine {
     public var backupsDirectory: URL {
         // Preferred: /var/mobile/Documents/AppVault/Backups (accessible across apps)
         let rootMobile = URL(fileURLWithPath: "/var/mobile/Documents/AppVault/Backups", isDirectory: true)
-        if fileManager.isWritableFile(atPath: "/var/mobile/Documents") || fileManager.fileExists(atPath: rootMobile.path) {
+        let mobileDocs = URL(fileURLWithPath: "/var/mobile/Documents", isDirectory: true)
+
+        if !fileManager.fileExists(atPath: mobileDocs.path) {
+            try? fileManager.createDirectory(at: mobileDocs, withIntermediateDirectories: true)
+            PosixHelper.shared.fixPermissions(at: mobileDocs.path)
+        }
+
+        if fileManager.fileExists(atPath: rootMobile.path) || fileManager.isWritableFile(atPath: "/var/mobile/Documents") {
             try? fileManager.createDirectory(at: rootMobile, withIntermediateDirectories: true)
             PosixHelper.shared.fixPermissions(at: rootMobile.path)
             return rootMobile
         }
 
         // Fallback: Sandbox Documents/Backups
-        let docs = fileManager.urls(for: .documentDirectory, in: .userDomainMask).first!
-        let localBackups = docs.appendingPathComponent("Backups", isDirectory: true)
-        try? fileManager.createDirectory(at: localBackups, withIntermediateDirectories: true)
-        PosixHelper.shared.fixPermissions(at: localBackups.path)
-        return localBackups
+        if let docs = fileManager.urls(for: .documentDirectory, in: .userDomainMask).first {
+            let localBackups = docs.appendingPathComponent("Backups", isDirectory: true)
+            try? fileManager.createDirectory(at: localBackups, withIntermediateDirectories: true)
+            PosixHelper.shared.fixPermissions(at: localBackups.path)
+            return localBackups
+        }
+
+        let tmpFallback = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("Backups", isDirectory: true)
+        try? fileManager.createDirectory(at: tmpFallback, withIntermediateDirectories: true)
+        return tmpFallback
     }
 
     private init() {
@@ -33,6 +45,8 @@ public final class BackupEngine {
         for app: InstalledApp,
         mode: BackupMode,
         includeCaches: Bool,
+        includeKeychain: Bool = true,
+        includeAppGroups: Bool = true,
         note: String,
         progress: @escaping (OperationProgress) -> Void
     ) async throws -> BackupRecord {
@@ -62,6 +76,8 @@ public final class BackupEngine {
             for: app,
             mode: mode,
             includeCaches: includeCaches,
+            includeKeychain: includeKeychain,
+            includeAppGroups: includeAppGroups,
             note: note,
             onProgress: progress
         ) { chunk in
@@ -81,6 +97,8 @@ public final class BackupEngine {
         for app: InstalledApp,
         mode: BackupMode,
         includeCaches: Bool,
+        includeKeychain: Bool = true,
+        includeAppGroups: Bool = true,
         note: String,
         progress: @escaping (OperationProgress) -> Void
     ) async throws -> BackupRecord {
@@ -109,6 +127,8 @@ public final class BackupEngine {
             for: app,
             mode: mode,
             includeCaches: includeCaches,
+            includeKeychain: includeKeychain,
+            includeAppGroups: includeAppGroups,
             note: note,
             onProgress: { p in
                 progress(OperationProgress(

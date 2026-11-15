@@ -658,8 +658,10 @@ public final class StreamingArchiveEngine {
     public func streamBackup(
         for app: InstalledApp,
         mode: BackupMode,
-        includeCaches: Bool,
-        note: String,
+        includeCaches: Bool = false,
+        includeKeychain: Bool = true,
+        includeAppGroups: Bool = true,
+        note: String = "",
         onProgress: @escaping (OperationProgress) -> Void,
         onCompressedChunk: @escaping (Data) async throws -> Void
     ) async throws -> BackupRecord {
@@ -698,15 +700,17 @@ public final class StreamingArchiveEngine {
             }
         }
 
-        // C. App Groups
+        // C. App Groups (if enabled)
         var savedGroups: [String] = []
-        for (groupID, groupURL) in app.groupContainerURLs {
-            guard fileManager.fileExists(atPath: groupURL.path) else { continue }
-            savedGroups.append(groupID)
-            for sub in ["Documents", "Library"] {
-                let subURL = groupURL.appendingPathComponent(sub)
-                guard fileManager.fileExists(atPath: subURL.path) else { continue }
-                collectItems(rootURL: subURL, baseArchivePath: "AppGroups/\(groupID)/\(sub)", includeCaches: includeCaches, into: &items, totalBytes: &totalBytesToProcess)
+        if includeAppGroups {
+            for (groupID, groupURL) in app.groupContainerURLs {
+                guard fileManager.fileExists(atPath: groupURL.path) else { continue }
+                savedGroups.append(groupID)
+                for sub in ["Documents", "Library"] {
+                    let subURL = groupURL.appendingPathComponent(sub)
+                    guard fileManager.fileExists(atPath: subURL.path) else { continue }
+                    collectItems(rootURL: subURL, baseArchivePath: "AppGroups/\(groupID)/\(sub)", includeCaches: includeCaches, into: &items, totalBytes: &totalBytesToProcess)
+                }
             }
         }
 
@@ -743,14 +747,16 @@ public final class StreamingArchiveEngine {
             try await gzip.write(data: Data(count: metaPad))
         }
 
-        // Write Keychain items into tar stream
-        let keychainItems = KeychainService.shared.dumpKeychainItems(for: app.bundleIdentifier)
-        if !keychainItems.isEmpty, let kcData = try? encoder.encode(keychainItems) {
-            try await writeTarItem(path: "KeychainItems.plist", size: Int64(kcData.count), typeflag: "0", mode: 0o644, to: gzip)
-            try await gzip.write(data: kcData)
-            let kcPad = (512 - (kcData.count % 512)) % 512
-            if kcPad > 0 {
-                try await gzip.write(data: Data(count: kcPad))
+        // Write Keychain items into tar stream (if enabled)
+        if includeKeychain {
+            let keychainItems = KeychainService.shared.dumpKeychainItems(for: app.bundleIdentifier)
+            if !keychainItems.isEmpty, let kcData = try? encoder.encode(keychainItems) {
+                try await writeTarItem(path: "KeychainItems.plist", size: Int64(kcData.count), typeflag: "0", mode: 0o644, to: gzip)
+                try await gzip.write(data: kcData)
+                let kcPad = (512 - (kcData.count % 512)) % 512
+                if kcPad > 0 {
+                    try await gzip.write(data: Data(count: kcPad))
+                }
             }
         }
 
@@ -798,9 +804,12 @@ public final class StreamingArchiveEngine {
                 }
 
                 // Zero-pad if file was shorter than declared or couldn't be fully read
-                let unread = item.size - fileBytesRead
-                if unread > 0 {
-                    try await gzip.write(data: Data(count: Int(unread)))
+                var unreadRemaining = item.size - fileBytesRead
+                let zeroChunkSize = 65536
+                while unreadRemaining > 0 {
+                    let toPad = min(Int64(zeroChunkSize), unreadRemaining)
+                    try await gzip.write(data: Data(count: Int(toPad)))
+                    unreadRemaining -= toPad
                 }
 
                 let pad = (512 - (Int(item.size) % 512)) % 512

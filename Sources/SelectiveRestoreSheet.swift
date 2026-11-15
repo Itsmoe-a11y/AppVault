@@ -130,5 +130,6 @@ public struct SelectiveRestoreSheet: View {
                 }
             }
         }
+        .navigationViewStyle(StackNavigationViewStyle())
     }
 }

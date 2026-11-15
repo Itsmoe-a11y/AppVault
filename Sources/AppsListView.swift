@@ -65,6 +65,7 @@ public struct AppsListView: View {
                         ForEach(appsVM.filteredApps) { app in
                             AppRowView(
                                 app: app,
+                                isScanning: appsVM.isScanning,
                                 isSelectionMode: appsVM.isSelectionMode,
                                 isSelected: appsVM.selectedAppIDs.contains(app.bundleIdentifier),
                                 onToggleSelect: { appsVM.toggleSelection(for: app) },
@@ -134,28 +135,31 @@ public struct AppsListView: View {
                     }
                 }
             }
-            .sheet(item: $appsVM.activeSheet) { sheet in
-                switch sheet {
-                case .backup(let target):
-                    BackupDetailSheet(app: target)
-                        .environmentObject(backupsVM)
-                case .explore(let target):
-                    NavigationView {
-                        DataExplorerView(app: target)
-                    }
-                case .batchBackup(let targetApps):
-                    BatchBackupSheet(apps: targetApps)
-                        .environmentObject(backupsVM)
-                }
             }
         }
         .navigationViewStyle(StackNavigationViewStyle())
+        .sheet(item: $appsVM.activeSheet) { sheet in
+            switch sheet {
+            case .backup(let target):
+                BackupDetailSheet(app: target)
+                    .environmentObject(backupsVM)
+            case .explore(let target):
+                NavigationView {
+                    DataExplorerView(app: target)
+                }
+                .navigationViewStyle(StackNavigationViewStyle())
+            case .batchBackup(let targetApps):
+                BatchBackupSheet(apps: targetApps)
+                    .environmentObject(backupsVM)
+            }
+        }
     }
 }
 
 // MARK: - App Row Component
 struct AppRowView: View {
     let app: InstalledApp
+    let isScanning: Bool
     let isSelectionMode: Bool
     let isSelected: Bool
     let onToggleSelect: () -> Void
@@ -205,10 +209,19 @@ struct AppRowView: View {
                         .font(.system(size: 11))
                         .foregroundColor(.secondary)
 
-                    if app.dataSizeBytes > 0 {
-                        Text("\u{2022} Data: \(ByteCountFormatter.string(fromByteCount: app.dataSizeBytes, countStyle: .file))")
+                    let totalData = app.dataSizeBytes + app.groupSizeBytes
+                    if totalData > 0 {
+                        Text("\u{2022} Data: \(ByteCountFormatter.string(fromByteCount: totalData, countStyle: .file))")
                             .font(.system(size: 11))
                             .foregroundColor(.blue)
+                    } else if app.appSizeBytes > 0 {
+                        Text("\u{2022} App: \(ByteCountFormatter.string(fromByteCount: app.appSizeBytes, countStyle: .file))")
+                            .font(.system(size: 11))
+                            .foregroundColor(.secondary)
+                    } else if isScanning {
+                        Text("\u{2022} Calculating...")
+                            .font(.system(size: 11))
+                            .foregroundColor(.secondary)
                     }
                 }
             }

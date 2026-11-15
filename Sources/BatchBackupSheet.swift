@@ -205,6 +205,7 @@ public struct BatchBackupSheet: View {
                 }
             }
         }
+        .navigationViewStyle(StackNavigationViewStyle())
     }
 
     private func cancelBatchProcess() {
@@ -317,5 +318,6 @@ public struct BatchBackupSheet: View {
                 }
             }
         }
+        .navigationViewStyle(StackNavigationViewStyle())
     }
 }
