@@ -135,7 +135,6 @@ public struct AppsListView: View {
                     }
                 }
             }
-            }
         }
         .navigationViewStyle(StackNavigationViewStyle())
         .sheet(item: $appsVM.activeSheet) { sheet in

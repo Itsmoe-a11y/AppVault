@@ -273,7 +273,6 @@ public struct BackupsListView: View {
                 }
             }
         }
-        .navigationViewStyle(StackNavigationViewStyle())
     }
 }
 
@@ -550,6 +549,5 @@ struct BackupCardView: View {
                 Label("Delete Archive", systemImage: "trash")
             }
         }
-        .navigationViewStyle(StackNavigationViewStyle())
     }
 }
