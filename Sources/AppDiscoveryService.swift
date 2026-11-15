@@ -1,17 +1,47 @@
 import Foundation
 import UIKit
+import Darwin
 
 public final class AppDiscoveryService {
     public static let shared = AppDiscoveryService()
 
     private let fileManager = FileManager.default
 
+    // MARK: - Thread-safe Container Maps Cache
+    private var cachedContainerMaps: ContainerMaps?
+    private var containerMapsCacheDate: Date?
+    private let cacheLock = NSLock()
+    private let cacheTTL: TimeInterval = 60.0 // 60 seconds cache TTL
+
     private init() {}
 
+    public func invalidateCache() {
+        cacheLock.lock()
+        defer { cacheLock.unlock() }
+        cachedContainerMaps = nil
+        containerMapsCacheDate = nil
+    }
+
+    private func getContainerMaps(forceRefresh: Bool = false) -> ContainerMaps {
+        cacheLock.lock()
+        defer { cacheLock.unlock() }
+
+        if !forceRefresh,
+           let cached = cachedContainerMaps,
+           let cacheDate = containerMapsCacheDate,
+           Date().timeIntervalSince(cacheDate) < cacheTTL {
+            return cached
+        }
+
+        let maps = buildContainerMaps()
+        cachedContainerMaps = maps
+        containerMapsCacheDate = Date()
+        return maps
+    }
+
     // MARK: - Enumerate Installed Applications
-    public func fetchInstalledApps() -> [InstalledApp] {
-        // Pre-scan filesystem container maps to resolve missing URLs for third-party apps like WhatsApp
-        let containerMaps = buildContainerMaps()
+    public func fetchInstalledApps(forceRefresh: Bool = false) -> [InstalledApp] {
+        let containerMaps = getContainerMaps(forceRefresh: forceRefresh)
 
         // 1. Fetch apps from LSApplicationWorkspace
         var apps = fetchViaLSApplicationWorkspace(containerMaps: containerMaps)
@@ -96,6 +126,131 @@ public final class AppDiscoveryService {
         return maps
     }
 
+    // MARK: - App Group Matching Helpers
+    private func cleanIdentifier(_ identifier: String) -> String {
+        var cleaned = identifier.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        // Strip "group." if at the beginning
+        if cleaned.lowercased().hasPrefix("group.") {
+            cleaned = String(cleaned.dropFirst(6))
+        }
+
+        // Strip 10-character alphanumeric Team ID prefix (e.g. "5A44372955.")
+        if let dotIndex = cleaned.firstIndex(of: ".") {
+            let prefix = String(cleaned[..<dotIndex])
+            if prefix.count == 10 && prefix.rangeOfCharacter(from: CharacterSet.alphanumerics.inverted) == nil {
+                cleaned = String(cleaned[cleaned.index(after: dotIndex)...])
+            }
+        }
+
+        // Check if "group." was placed after Team ID: e.g. "5A44372955.group.net.whatsapp"
+        if cleaned.lowercased().hasPrefix("group.") {
+            cleaned = String(cleaned.dropFirst(6))
+        }
+
+        return cleaned
+    }
+
+    private func matchesAppGroup(groupID: String, bundleID: String) -> Bool {
+        let cleanGroup = cleanIdentifier(groupID).lowercased()
+        let cleanBundle = cleanIdentifier(bundleID).lowercased()
+
+        guard !cleanGroup.isEmpty && !cleanBundle.isEmpty else { return false }
+
+        // 1. Exact match
+        if cleanGroup == cleanBundle { return true }
+
+        // 2. Group is sub-group of bundle: e.g. "net.whatsapp.whatsapp.shared" hasPrefix "net.whatsapp.whatsapp"
+        if cleanGroup.hasPrefix(cleanBundle + ".") || cleanGroup.hasPrefix(cleanBundle + "_") {
+            return true
+        }
+
+        // 3. Bundle hasPrefix group: e.g. cleanGroup is "net.whatsapp" and cleanBundle is "net.whatsapp.whatsapp"
+        if cleanBundle.hasPrefix(cleanGroup + ".") {
+            return true
+        }
+
+        // 4. Common root domain matching
+        let groupParts = cleanGroup.components(separatedBy: ".")
+        let bundleParts = cleanBundle.components(separatedBy: ".")
+        if groupParts.count >= 2 && bundleParts.count >= 2 {
+            let genericDomains = ["com", "net", "org", "io", "app", "dev", "co", "uk", "de"]
+            if !genericDomains.contains(groupParts[0]) {
+                if groupParts[0] == bundleParts[0] {
+                    return true
+                }
+            } else if groupParts.count >= 3 && bundleParts.count >= 3 {
+                // e.g. com.google.chrome vs com.google.common
+                if groupParts[0] == bundleParts[0] && groupParts[1] == bundleParts[1] && groupParts[2] == bundleParts[2] {
+                    return true
+                }
+            }
+        }
+
+        return false
+    }
+
+    private func extractAppGroupsFromProvisionOrEntitlements(data: Data) -> [String] {
+        guard let content = String(data: data, encoding: .isoLatin1) else { return [] }
+
+        guard let plistStart = content.range(of: "<?xml"),
+              let plistEnd = content.range(of: "</plist>", range: plistStart.lowerBound..<content.endIndex) else {
+            return []
+        }
+
+        let plistXML = String(content[plistStart.lowerBound..<plistEnd.upperBound])
+        guard let xmlData = plistXML.data(using: .utf8),
+              let dict = (try? PropertyListSerialization.propertyList(from: xmlData, format: nil)) as? [String: Any] else {
+            return []
+        }
+
+        // Check Entitlements dictionary
+        if let entitlements = dict["Entitlements"] as? [String: Any],
+           let groups = entitlements["com.apple.security.application-groups"] as? [String] {
+            return groups
+        }
+
+        // Or direct key if this is an entitlements file
+        if let groups = dict["com.apple.security.application-groups"] as? [String] {
+            return groups
+        }
+
+        return []
+    }
+
+    private func resolveGroupContainers(
+        for bundleID: String,
+        proxyGroups: [String: URL],
+        bundleURL: URL?,
+        containerMaps: ContainerMaps
+    ) -> [String: URL] {
+        var groups = proxyGroups
+
+        // 1. Check App Entitlements if bundle is accessible
+        if let bundle = bundleURL {
+            for entitlementFile in ["embedded.mobileprovision", "archived-expanded-entitlements.xcent"] {
+                let fileURL = bundle.appendingPathComponent(entitlementFile)
+                if let data = try? Data(contentsOf: fileURL) {
+                    let groupIDs = extractAppGroupsFromProvisionOrEntitlements(data: data)
+                    for gid in groupIDs {
+                        if let gURL = containerMaps.groupContainers[gid] {
+                            groups[gid] = gURL
+                        }
+                    }
+                }
+            }
+        }
+
+        // 2. Match any filesystem groupContainers that match this app's bundleID
+        for (groupID, gURL) in containerMaps.groupContainers {
+            if groups[groupID] == nil && matchesAppGroup(groupID: groupID, bundleID: bundleID) {
+                groups[groupID] = gURL
+            }
+        }
+
+        return groups
+    }
+
     // MARK: - Primary: LSApplicationWorkspace
     private func fetchViaLSApplicationWorkspace(containerMaps: ContainerMaps) -> [InstalledApp] {
         guard let workspaceClass = NSClassFromString("LSApplicationWorkspace") as? NSObject.Type,
@@ -117,16 +272,8 @@ public final class AppDiscoveryService {
             var bundleID = stringProperty(proxy, selectorName: "bundleIdentifier") ??
                            stringProperty(proxy, selectorName: "applicationIdentifier") ?? ""
 
-            // Strip 10-char team prefix if present (e.g. "5A44372955.net.whatsapp.WhatsApp" -> "net.whatsapp.WhatsApp")
-            if let dotIndex = bundleID.firstIndex(of: ".") {
-                let prefix = String(bundleID[..<dotIndex])
-                if prefix.count == 10 && prefix.rangeOfCharacter(from: CharacterSet.alphanumerics.inverted) == nil {
-                    let cleaned = String(bundleID[bundleID.index(after: dotIndex)...])
-                    if !cleaned.isEmpty {
-                        bundleID = cleaned
-                    }
-                }
-            }
+            // Strip 10-char team prefix if present
+            bundleID = cleanIdentifier(bundleID)
 
             guard !bundleID.isEmpty else { continue }
 
@@ -149,15 +296,13 @@ public final class AppDiscoveryService {
             let dataContainerURL = urlProperty(proxy, selectorName: "dataContainerURL") ?? containerMaps.dataContainers[bundleID]
 
             // Group Containers: merge workspace groups with filesystem groupContainers matching app bundleID
-            var groupContainerURLs = groupContainersProperty(proxy)
-            if groupContainerURLs.isEmpty {
-                for (groupID, gURL) in containerMaps.groupContainers {
-                    // Match groups like "group.net.whatsapp.WhatsApp.shared" to "net.whatsapp.WhatsApp"
-                    if groupID.contains(bundleID) || bundleID.contains(groupID.replacingOccurrences(of: "group.", with: "")) {
-                        groupContainerURLs[groupID] = gURL
-                    }
-                }
-            }
+            let initialGroups = groupContainersProperty(proxy)
+            let groupContainerURLs = resolveGroupContainers(
+                for: bundleID,
+                proxyGroups: initialGroups,
+                bundleURL: bundleURL,
+                containerMaps: containerMaps
+            )
 
             // System App Check
             let appType = stringProperty(proxy, selectorName: "applicationType") ?? "User"
@@ -196,7 +341,8 @@ public final class AppDiscoveryService {
                     continue
                 }
 
-                guard let bundleID = plist["CFBundleIdentifier"] as? String else { continue }
+                guard let rawBundleID = plist["CFBundleIdentifier"] as? String else { continue }
+                let bundleID = cleanIdentifier(rawBundleID)
                 if bundleID == Bundle.main.bundleIdentifier || bundleID == "dev.moe.appvault" {
                     continue
                 }
@@ -209,12 +355,12 @@ public final class AppDiscoveryService {
 
                 let dataURL = containerMaps.dataContainers[bundleID]
 
-                var groups: [String: URL] = [:]
-                for (groupID, gURL) in containerMaps.groupContainers {
-                    if groupID.contains(bundleID) || bundleID.contains(groupID.replacingOccurrences(of: "group.", with: "")) {
-                        groups[groupID] = gURL
-                    }
-                }
+                let groups = resolveGroupContainers(
+                    for: bundleID,
+                    proxyGroups: [:],
+                    bundleURL: appBundle,
+                    containerMaps: containerMaps
+                )
 
                 results[bundleID] = InstalledApp(
                     bundleIdentifier: bundleID,
@@ -255,16 +401,18 @@ public final class AppDiscoveryService {
 
     public func directorySize(at url: URL) -> Int64 {
         var size: Int64 = 0
-        let keys: [URLResourceKey] = [.totalFileAllocatedSizeKey, .fileAllocatedSizeKey, .fileSizeKey, .isRegularFileKey]
-        guard let enumerator = fileManager.enumerator(at: url, includingPropertiesForKeys: keys, options: [.skipsHiddenFiles]) else {
+        guard let enumerator = fileManager.enumerator(at: url, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles, .skipsPackageDescendants]) else {
             return 0
         }
 
         for case let fileURL as URL in enumerator {
-            guard let values = try? fileURL.resourceValues(forKeys: Set(keys)) else { continue }
-            // Only count regular files to avoid blocking on sockets or FIFOs
-            if values.isRegularFile == true {
-                size += Int64(values.totalFileAllocatedSize ?? values.fileAllocatedSize ?? values.fileSize ?? 0)
+            var st = stat()
+            // Use lstat to avoid following symlinks into loops or opening sockets/FIFOs
+            guard lstat(fileURL.path, &st) == 0 else { continue }
+            let fileType = st.st_mode & S_IFMT
+
+            if fileType == S_IFREG {
+                size += Int64(st.st_size)
             }
         }
 

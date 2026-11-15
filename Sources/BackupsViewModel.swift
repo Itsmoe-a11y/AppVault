@@ -48,6 +48,7 @@ public final class BackupsViewModel: ObservableObject {
     @Published public var showAlert: Bool = false
     @Published public var restoreConfirmationRecord: BackupRecord? = nil
     @Published public var restoreConfirmationCloudFile: GoogleDriveFile? = nil
+    @Published public var renameTargetRecord: BackupRecord? = nil
 
     private let fileManager = FileManager.default
 
@@ -68,6 +69,12 @@ public final class BackupsViewModel: ObservableObject {
         Task.detached(priority: .userInitiated) {
             let backupDir = BackupEngine.shared.backupsDirectory
             let fm = FileManager.default
+
+            // Ensure backup directory exists
+            if !fm.fileExists(atPath: backupDir.path) {
+                try? fm.createDirectory(at: backupDir, withIntermediateDirectories: true)
+            }
+
             guard let files = try? fm.contentsOfDirectory(at: backupDir, includingPropertiesForKeys: [.contentModificationDateKey, .fileSizeKey], options: [.skipsHiddenFiles]) else {
                 await MainActor.run {
                     self.backups = []
@@ -114,6 +121,15 @@ public final class BackupsViewModel: ObservableObject {
 
     // MARK: - Read Metadata from Local Archive
     nonisolated private func readMetadata(from archiveURL: URL) -> BackupRecord? {
+        // 1. Fast extraction from tar.gz / PKZip via RestoreEngine
+        if var record = RestoreEngine.shared.extractMetadata(from: archiveURL) {
+            if let attrs = try? FileManager.default.attributesOfItem(atPath: archiveURL.path),
+               let size = attrs[.size] as? Int64 {
+                record.fileSizeBytes = size
+            }
+            return record
+        }
+
         let tempMetaDir = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("Meta_\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: tempMetaDir) }
 
@@ -160,7 +176,7 @@ public final class BackupsViewModel: ObservableObject {
         return record
     }
 
-    // MARK: - Execute Streaming Backup (Local or Google Drive)
+    // MARK: - Execute Streaming Backup (Local, Google Drive, or WebDAV)
     public func startBackup(
         for app: InstalledApp,
         mode: BackupMode,
@@ -339,17 +355,37 @@ public final class BackupsViewModel: ObservableObject {
     // MARK: - Download Cloud Backup to Local Storage
     public func downloadCloudBackupToLocal(file: GoogleDriveFile) {
         let dest = BackupEngine.shared.backupsDirectory.appendingPathComponent(file.name)
-        Task {
+        isPerformingOperation = true
+        activeProgress = OperationProgress(stage: "Downloading", fractionCompleted: 0.05, statusDetail: "Downloading \(file.name)...")
+
+        Task.detached(priority: .userInitiated) {
             do {
-                try await GoogleDriveService.shared.downloadFile(file: file, destinationURL: dest) { _ in }
-                self.refreshLocalBackups()
-                self.alertTitle = "Download Finished"
-                self.alertMessage = "Saved \(file.name) to on-device backups."
-                self.showAlert = true
+                try await GoogleDriveService.shared.downloadFile(file: file, destinationURL: dest) { pct in
+                    Task { @MainActor in
+                        self.activeProgress = OperationProgress(
+                            stage: "Downloading Cloud File",
+                            fractionCompleted: pct,
+                            statusDetail: "Downloading \(file.name): \(Int(pct * 100))%"
+                        )
+                    }
+                }
+
+                await MainActor.run {
+                    self.isPerformingOperation = false
+                    self.activeProgress = nil
+                    self.refreshLocalBackups()
+                    self.alertTitle = "Download Finished"
+                    self.alertMessage = "Saved \(file.name) to on-device backups."
+                    self.showAlert = true
+                }
             } catch {
-                self.alertTitle = "Download Error"
-                self.alertMessage = error.localizedDescription
-                self.showAlert = true
+                await MainActor.run {
+                    self.isPerformingOperation = false
+                    self.activeProgress = nil
+                    self.alertTitle = "Download Error"
+                    self.alertMessage = error.localizedDescription
+                    self.showAlert = true
+                }
             }
         }
     }
@@ -368,22 +404,120 @@ public final class BackupsViewModel: ObservableObject {
         }
     }
 
-    // MARK: - Delete Local Backup
+    // MARK: - Delete Local Backup with POSIX Checks
     public func deleteBackup(_ record: BackupRecord) {
         let archiveURL = BackupEngine.shared.backupsDirectory.appendingPathComponent(record.archiveFileName)
-        try? fileManager.removeItem(at: archiveURL)
-        backups.removeAll { $0.id == record.id }
+
+        if fileManager.fileExists(atPath: archiveURL.path) {
+            do {
+                try fileManager.removeItem(at: archiveURL)
+                backups.removeAll { $0.id == record.id }
+            } catch {
+                alertTitle = "Delete Failed"
+                alertMessage = "Unable to delete archive '\(record.archiveFileName)': \(error.localizedDescription)"
+                showAlert = true
+            }
+        } else {
+            // File does not exist on disk, remove stale record
+            backups.removeAll { $0.id == record.id }
+        }
     }
 
-    // MARK: - Import Backup
+    // MARK: - Rename Local Backup with POSIX Validation
+    public func renameBackup(_ record: BackupRecord, to newDisplayName: String) {
+        let trimmed = newDisplayName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            alertTitle = "Invalid Name"
+            alertMessage = "Backup name cannot be empty."
+            showAlert = true
+            return
+        }
+
+        // Sanitize characters to comply with POSIX filesystem standards
+        let invalidChars = CharacterSet(charactersIn: "/:\\?%*|\"<>")
+        let sanitized = trimmed.components(separatedBy: invalidChars).joined(separator: "_")
+
+        let currentURL = BackupEngine.shared.backupsDirectory.appendingPathComponent(record.archiveFileName)
+        guard fileManager.fileExists(atPath: currentURL.path) else {
+            alertTitle = "File Not Found"
+            alertMessage = "The backup file '\(record.archiveFileName)' does not exist on disk."
+            showAlert = true
+            return
+        }
+
+        let fileExt = currentURL.pathExtension.isEmpty ? "adbk" : currentURL.pathExtension
+        let newFileName = sanitized.lowercased().hasSuffix(".\(fileExt.lowercased())") ? sanitized : "\(sanitized).\(fileExt)"
+        let targetURL = BackupEngine.shared.backupsDirectory.appendingPathComponent(newFileName)
+
+        if currentURL.path == targetURL.path {
+            return // Same file, no action needed
+        }
+
+        guard !fileManager.fileExists(atPath: targetURL.path) else {
+            alertTitle = "Name Conflict"
+            alertMessage = "A backup file named '\(newFileName)' already exists. Please choose a different name."
+            showAlert = true
+            return
+        }
+
+        do {
+            try fileManager.moveItem(at: currentURL, to: targetURL)
+            PosixHelper.shared.fixPermissions(at: targetURL.path)
+
+            // Update record in published backups array
+            if let idx = backups.firstIndex(where: { $0.id == record.id }) {
+                let current = backups[idx]
+                let updated = BackupRecord(
+                    id: current.id,
+                    bundleIdentifier: current.bundleIdentifier,
+                    appName: current.appName,
+                    appVersion: current.appVersion,
+                    appBuild: current.appBuild,
+                    createdAt: current.createdAt,
+                    mode: current.mode,
+                    includesCaches: current.includesCaches,
+                    note: current.note,
+                    archiveFileName: newFileName,
+                    fileSizeBytes: current.fileSizeBytes,
+                    hasAppBundle: current.hasAppBundle,
+                    hasDataContainer: current.hasDataContainer,
+                    appGroupIDs: current.appGroupIDs,
+                    deviceModel: current.deviceModel,
+                    systemVersion: current.systemVersion
+                )
+                backups[idx] = updated
+            }
+
+            alertTitle = "Backup Renamed"
+            alertMessage = "Successfully renamed to '\(newFileName)'."
+            showAlert = true
+        } catch {
+            alertTitle = "Rename Failed"
+            alertMessage = "POSIX filesystem error: \(error.localizedDescription)"
+            showAlert = true
+        }
+    }
+
+    // MARK: - Import Backup with Security-Scoped Resource Handling
     public func importArchive(from sourceURL: URL) {
+        let isSecurityScoped = sourceURL.startAccessingSecurityScopedResource()
+        defer {
+            if isSecurityScoped {
+                sourceURL.stopAccessingSecurityScopedResource()
+            }
+        }
+
         let dest = BackupEngine.shared.backupsDirectory.appendingPathComponent(sourceURL.lastPathComponent)
-        try? fileManager.removeItem(at: dest)
+
+        if fileManager.fileExists(atPath: dest.path) {
+            try? fileManager.removeItem(at: dest)
+        }
+
         do {
             try fileManager.copyItem(at: sourceURL, to: dest)
             PosixHelper.shared.fixPermissions(at: dest.path)
             refreshLocalBackups()
-            alertTitle = "Imported"
+            alertTitle = "Import Successful"
             alertMessage = "Successfully imported \(sourceURL.lastPathComponent)."
             showAlert = true
         } catch {

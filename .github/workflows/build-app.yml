@@ -14,10 +14,10 @@ on:
         type: boolean
         default: true
       release_tag:
-        description: 'Release Tag (defaults to v2.0.2)'
+        description: 'Release Tag (defaults to v2.1.0)'
         required: false
         type: string
-        default: 'v2.0.2'
+        default: 'v2.1.0'
 
 permissions:
   contents: write
@@ -86,26 +86,24 @@ jobs:
         if: ${{ github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && github.event.inputs.upload_release == 'true') }}
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ github.event.inputs.release_tag || 'v2.0.2' }}
-          name: "AppVault ${{ github.event.inputs.release_tag || 'v2.0.2' }}"
+          tag_name: ${{ github.event.inputs.release_tag || 'v2.1.0' }}
+          name: "AppVault ${{ github.event.inputs.release_tag || 'v2.1.0' }}"
           body: |
-            ## AppVault v2.0.2 - WhatsApp & Container Fixes, Socket Safety, and Stability
+            ## AppVault v2.1.0 - Professional Production Edition
 
             AppVault is an unsandboxed application for **TrollStore** and **jailbroken** iOS devices (iOS 15.0 - 17.0+).
 
-            ### Highlights in v2.0.2:
-            - 🟢 **Comprehensive App Container Discovery (WhatsApp & Third-Party Apps)**: Direct MobileContainerManager metadata resolver indices `/var/mobile/Containers/Data/Application`, `/var/containers/Bundle/Application`, and `/var/mobile/Containers/Shared/AppGroup`. Fixes 0 MB / missing document size for WhatsApp, Telegram, and other App Store apps.
-            - 🛡️ **IPC Socket & FIFO Safety**: Explicitly filters out Unix domain sockets, FIFOs, and character devices that previously caused streaming reads to hang or crash under watchdog.
-            - ⚡ **Stream Compressor Hardening**: Replaced offset pointer chunking with exact buffer tracking, eliminated infinite finish loops, and converted all file handles to native throwing `write(contentsOf:)` and `read(upToCount:)`.
-            - 🔑 **TrollStore Keychain & AppData Entitlements**: Added `keychain-access-groups` (`*`), `com.apple.private.keychain.all-access`, and `com.apple.private.security.storage.AppDataContainers`.
-            - 📖 **In-App Google Cloud Setup Guide**: Built-in 2-minute walkthrough sheet with one-tap Bundle Identifier copy helper (`dev.moe.appvault`).
-            1. 🔑 **Keychain Item Backup & Restore**: Extracts app-specific Keychain credentials (`kSecClassGenericPassword`, `kSecClassInternetPassword`) so you never get logged out of restored accounts.
-            2. 🌐 **Local Wi-Fi Browser Transfer Server**: Embedded HTTP server (`http://<device-ip>:8080`) providing a web dashboard to upload and download backups directly from any PC/Mac browser on your Wi-Fi network.
-            3. 🔒 **AES-256-GCM Encryption**: Password-protect backup archives with PBKDF2 SHA-256 key derivation.
-            4. ☁️ **Expanded Cloud Backends**: Direct streaming support for **Google Drive**, **WebDAV**, **Nextcloud**, and local NAS.
-            5. 🔍 **In-App Data Explorer (Plist & SQLite)**: Inspect app data containers on-device. Edit `.plist` preferences directly and query SQLite databases (`SELECT *`, view tables and rows).
-            6. 📦 **Batch Multi-Select Backup**: Queue backups for multiple apps in one automated sequence.
-            7. 🎯 **Selective Restore**: Granular checkboxes to choose exactly what to restore (Documents, Preferences, Databases, App Groups, or Keychain).
+            ### Core Architectural & Runtime Hardening in v2.1.0:
+            1. 📦 **POSIX UStar & GNU Long Link Engine**: Full 155-byte prefix + 100-byte name boundary split algorithm with GNU Long Link (`././@LongLink`) support for paths > 255 bytes. State machine `TarExtractor` with checksum verification and Tar Slip traversal guards.
+            2. ⚡ **Hardened zlib Streaming**: Zero-data-loss deflation and inflation engines with complete zlib return code validation (`Z_OK`, `Z_STREAM_END`, `Z_BUF_ERROR`, `Z_DATA_ERROR`, `Z_STREAM_ERROR`) and deinit cleanup.
+            3. 🛡️ **IPC Socket & FIFO Safety**: Strict `lstat` mode verification (`S_IFMT`) bypassing Unix domain sockets, FIFOs, and character devices that previously caused watchdog termination.
+            4. 🔗 **Native Symlink Archiving**: Broken and intact symlinks are recorded via `readlink` into Tar linkname without opening file handles, and restored natively via `symlink`.
+            5. 🔑 **Two-Pass Keychain Extraction**: Non-blocking `kSecUseAuthenticationUISkip` pass prevents biometric prompts/hangs; duplicate resolution via `SecItemUpdate` and entitlement recovery.
+            6. 🔒 **Hardened Cryptography**: CSPRNG salt verification, 100,000 PBKDF2-SHA256 iterations, AES-256-GCM authenticated tags, and sensitive key buffer memory wiping (`memset_s`).
+            7. 🌐 **Zero-RAM Wi-Fi Web Server**: Defense-in-depth path traversal prevention, 128 KB chunked streaming downloads, streaming multipart uploads, and 64 KB header limits.
+            8. ☁️ **Resilient Cloud Storage**: RFC 7636 PKCE code challenge, Google Drive Resumable Upload 308 range inspection & 401 token refresh retries, and RFC 4918 WebDAV PROPFIND XML parser.
+            9. 🔍 **Data Explorer & SQLite3 C-API**: Bulletproof handle & statement cleanups with `sqlite3_close_v2`, table name sanitization, type-safe column decoding, and atomic format-preserving Plist editor with type badges.
+            10. 🎯 **UI & Concurrency Stability**: Unified sheet presentation, non-blocking background directory calculations, resilient batch backup queue with per-app error logging, and POSIX-verified backup rename & delete.
 
             ### Installation:
             - **TrollStore**: Download `AppVault.tipa` (or `AppVault.ipa`) and open in TrollStore.

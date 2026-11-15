@@ -23,10 +23,63 @@ public struct GoogleDriveFile: Identifiable, Codable, Hashable {
     }
 }
 
+// MARK: - Download Progress Tracking Helper
+private final class DownloadProgressDelegate: NSObject, URLSessionDownloadDelegate, @unchecked Sendable {
+    private let onProgress: (Double) -> Void
+    private var continuation: CheckedContinuation<URL, Error>?
+
+    init(onProgress: @escaping (Double) -> Void) {
+        self.onProgress = onProgress
+    }
+
+    func setContinuation(_ continuation: CheckedContinuation<URL, Error>) {
+        self.continuation = continuation
+    }
+
+    func urlSession(
+        _ session: URLSession,
+        downloadTask: URLSessionDownloadTask,
+        didWriteData bytesWritten: Int64,
+        totalBytesWritten: Int64,
+        totalBytesExpectedToWrite: Int64
+    ) {
+        if totalBytesExpectedToWrite > 0 {
+            let fraction = Double(totalBytesWritten) / Double(totalBytesExpectedToWrite)
+            DispatchQueue.main.async {
+                self.onProgress(min(max(fraction, 0.0), 1.0))
+            }
+        }
+    }
+
+    func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask, didFinishDownloadingTo location: URL) {
+        // Move to temporary location since system deletes file after callback returns
+        let tempDir = FileManager.default.temporaryDirectory
+        let destination = tempDir.appendingPathComponent(UUID().uuidString)
+        do {
+            try FileManager.default.moveItem(at: location, to: destination)
+            continuation?.resume(returning: destination)
+        } catch {
+            continuation?.resume(throwing: error)
+        }
+        continuation = nil
+    }
+
+    func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
+        if let error = error {
+            continuation?.resume(throwing: error)
+            continuation = nil
+        }
+    }
+}
+
 // MARK: - Google Drive Service
 @MainActor
 public final class GoogleDriveService: NSObject, ObservableObject, ASWebAuthenticationPresentationContextProviding {
     public static let shared = GoogleDriveService()
+
+    private static let keychainService = "dev.moe.appvault.gdrive"
+    private static let keychainRefreshTokenAccount = "oauth_refresh_token"
+    private static let keychainAccessTokenAccount = "oauth_access_token"
 
     @Published public var isAuthenticated: Bool = false
     @Published public var userEmail: String = ""
@@ -35,22 +88,52 @@ public final class GoogleDriveService: NSObject, ObservableObject, ASWebAuthenti
     @Published public var errorMessage: String? = nil
 
     // Configurable Google OAuth Credentials
-    // Users can provide their own Client ID & Secret in Settings, or use default OAuth
     @Published public var customClientId: String {
         didSet { UserDefaults.standard.set(customClientId, forKey: "gdrive_client_id") }
     }
     @Published public var customClientSecret: String {
-        didSet { UserDefaults.standard.set(customClientSecret, forKey: "gdrive_client_secret") }
+        didSet {
+            UserDefaults.standard.set(customClientSecret, forKey: "gdrive_client_secret")
+        }
     }
 
+    // In-memory caching with Keychain backed persistent storage
+    private var _cachedAccessToken: String?
     private var accessToken: String? {
-        get { UserDefaults.standard.string(forKey: "gdrive_access_token") }
-        set { UserDefaults.standard.set(newValue, forKey: "gdrive_access_token") }
+        get {
+            if let cached = _cachedAccessToken { return cached }
+            let loaded = KeychainService.shared.loadPassword(service: Self.keychainService, account: Self.keychainAccessTokenAccount)
+            _cachedAccessToken = loaded
+            return loaded
+        }
+        set {
+            _cachedAccessToken = newValue
+            if let value = newValue {
+                KeychainService.shared.savePassword(service: Self.keychainService, account: Self.keychainAccessTokenAccount, password: value)
+            } else {
+                KeychainService.shared.deletePassword(service: Self.keychainService, account: Self.keychainAccessTokenAccount)
+            }
+        }
     }
+
+    private var _cachedRefreshToken: String?
     private var refreshToken: String? {
-        get { UserDefaults.standard.string(forKey: "gdrive_refresh_token") }
-        set { UserDefaults.standard.set(newValue, forKey: "gdrive_refresh_token") }
+        get {
+            if let cached = _cachedRefreshToken { return cached }
+            let loaded = KeychainService.shared.loadPassword(service: Self.keychainService, account: Self.keychainRefreshTokenAccount)
+            _cachedRefreshToken = loaded
+            return loaded
+        }
+        set {
+            _cachedRefreshToken = newValue
+            if let value = newValue {
+                KeychainService.shared.savePassword(service: Self.keychainService, account: Self.keychainRefreshTokenAccount, password: value)
+            } else {
+                KeychainService.shared.deletePassword(service: Self.keychainService, account: Self.keychainRefreshTokenAccount)
+            }
+        }
     }
+
     private var tokenExpiry: Date? {
         get { UserDefaults.standard.object(forKey: "gdrive_token_expiry") as? Date }
         set { UserDefaults.standard.set(newValue, forKey: "gdrive_token_expiry") }
@@ -67,12 +150,27 @@ public final class GoogleDriveService: NSObject, ObservableObject, ASWebAuthenti
             self.customClientId = savedClientId
         }
         self.customClientSecret = UserDefaults.standard.string(forKey: "gdrive_client_secret") ?? ""
+
         super.init()
+
+        // Secure migration from plaintext UserDefaults to Keychain
+        migrateTokensFromUserDefaultsIfNeeded()
 
         if let token = accessToken, !token.isEmpty {
             self.isAuthenticated = true
             self.userEmail = UserDefaults.standard.string(forKey: "gdrive_user_email") ?? ""
             self.userName = UserDefaults.standard.string(forKey: "gdrive_user_name") ?? ""
+        }
+    }
+
+    private func migrateTokensFromUserDefaultsIfNeeded() {
+        if let legacyRefresh = UserDefaults.standard.string(forKey: "gdrive_refresh_token"), !legacyRefresh.isEmpty {
+            self.refreshToken = legacyRefresh
+            UserDefaults.standard.removeObject(forKey: "gdrive_refresh_token")
+        }
+        if let legacyAccess = UserDefaults.standard.string(forKey: "gdrive_access_token"), !legacyAccess.isEmpty {
+            self.accessToken = legacyAccess
+            UserDefaults.standard.removeObject(forKey: "gdrive_access_token")
         }
     }
 
@@ -85,7 +183,7 @@ public final class GoogleDriveService: NSObject, ObservableObject, ASWebAuthenti
         return ASPresentationAnchor()
     }
 
-    // MARK: - OAuth 2.0 PKCE Sign In
+    // MARK: - OAuth 2.0 PKCE Sign In (RFC 7636)
     public func signIn() {
         let clientId = customClientId.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !clientId.isEmpty else {
@@ -110,9 +208,13 @@ public final class GoogleDriveService: NSObject, ObservableObject, ASWebAuthenti
         let scope = "https://www.googleapis.com/auth/drive.file https://www.googleapis.com/auth/userinfo.email https://www.googleapis.com/auth/userinfo.profile"
         let state = UUID().uuidString
 
-        // PKCE Code Verifier and Challenge
-        let verifier = generateCodeVerifier()
-        let challenge = generateCodeChallenge(from: verifier)
+        // PKCE Code Verifier (RFC 7636 Section 4.1) & Challenge (Section 4.2)
+        guard let verifier = generateCodeVerifier(),
+              let challenge = generateCodeChallenge(from: verifier) else {
+            isAuthenticating = false
+            errorMessage = "Failed to generate PKCE cryptographic material."
+            return
+        }
 
         var components = URLComponents(string: "https://accounts.google.com/o/oauth2/v2/auth")!
         components.queryItems = [
@@ -184,7 +286,12 @@ public final class GoogleDriveService: NSObject, ObservableObject, ASWebAuthenti
             bodyParams["client_secret"] = clientSecret
         }
 
-        let bodyString = bodyParams.map { "\($0.key)=\($0.value.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? "")" }.joined(separator: "&")
+        let bodyString = bodyParams.compactMap { key, value in
+            guard let encKey = key.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed),
+                  let encVal = value.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) else { return nil }
+            return "\(encKey)=\(encVal)"
+        }.joined(separator: "&")
+
         request.httpBody = bodyString.data(using: .utf8)
 
         do {
@@ -215,8 +322,9 @@ public final class GoogleDriveService: NSObject, ObservableObject, ASWebAuthenti
     }
 
     // MARK: - Refresh Access Token if Expired
+    @discardableResult
     public func ensureValidToken() async throws -> String {
-        if let expiry = tokenExpiry, Date() < expiry.addingTimeInterval(-60), let token = accessToken {
+        if let expiry = tokenExpiry, Date() < expiry.addingTimeInterval(-60), let token = accessToken, !token.isEmpty {
             return token
         }
 
@@ -243,14 +351,20 @@ public final class GoogleDriveService: NSObject, ObservableObject, ASWebAuthenti
             bodyParams["client_secret"] = clientSecret
         }
 
-        let bodyString = bodyParams.map { "\($0.key)=\($0.value.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? "")" }.joined(separator: "&")
+        let bodyString = bodyParams.compactMap { key, value in
+            guard let encKey = key.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed),
+                  let encVal = value.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) else { return nil }
+            return "\(encKey)=\(encVal)"
+        }.joined(separator: "&")
+
         request.httpBody = bodyString.data(using: .utf8)
 
         let (data, response) = try await URLSession.shared.data(for: request)
         guard let http = response as? HTTPURLResponse, http.statusCode == 200,
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let newAccess = json["access_token"] as? String else {
-            throw NSError(domain: "GoogleDrive", code: 401, userInfo: [NSLocalizedDescriptionKey: "Failed to refresh Google token."])
+            let errorText = String(data: data, encoding: .utf8) ?? "Authentication refresh failed"
+            throw NSError(domain: "GoogleDrive", code: 401, userInfo: [NSLocalizedDescriptionKey: "Failed to refresh Google token: \(errorText)"])
         }
 
         self.accessToken = newAccess
@@ -282,6 +396,8 @@ public final class GoogleDriveService: NSObject, ObservableObject, ASWebAuthenti
         accessToken = nil
         refreshToken = nil
         tokenExpiry = nil
+        _cachedAccessToken = nil
+        _cachedRefreshToken = nil
         userEmail = ""
         userName = ""
         isAuthenticated = false
@@ -292,9 +408,14 @@ public final class GoogleDriveService: NSObject, ObservableObject, ASWebAuthenti
     // MARK: - Get or Create "AppVault Backups" Folder in Google Drive
     public func getOrCreateAppFolder() async throws -> String {
         let token = try await ensureValidToken()
-        let query = "name = 'AppVault Backups' and mimeType = 'application/vnd.google-apps.folder' and trashed = false"
-        guard let queryEncoded = query.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed),
-              let listURL = URL(string: "https://www.googleapis.com/drive/v3/files?q=\(queryEncoded)&fields=files(id,name)") else {
+
+        var components = URLComponents(string: "https://www.googleapis.com/drive/v3/files")!
+        components.queryItems = [
+            URLQueryItem(name: "q", value: "name = 'AppVault Backups' and mimeType = 'application/vnd.google-apps.folder' and trashed = false"),
+            URLQueryItem(name: "fields", value: "files(id,name)")
+        ]
+
+        guard let listURL = components.url else {
             throw NSError(domain: "GoogleDrive", code: 400, userInfo: [NSLocalizedDescriptionKey: "Invalid query URL."])
         }
 
@@ -317,13 +438,13 @@ public final class GoogleDriveService: NSObject, ObservableObject, ASWebAuthenti
         var createReq = URLRequest(url: createURL)
         createReq.httpMethod = "POST"
         createReq.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
-        createReq.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        createReq.setValue("application/json; charset=UTF-8", forHTTPHeaderField: "Content-Type")
 
         let metadata: [String: Any] = [
             "name": "AppVault Backups",
             "mimeType": "application/vnd.google-apps.folder"
         ]
-        createReq.httpBody = try? JSONSerialization.data(withJSONObject: metadata)
+        createReq.httpBody = try JSONSerialization.data(withJSONObject: metadata)
 
         let (createData, res) = try await URLSession.shared.data(for: createReq)
         guard let http = res as? HTTPURLResponse, (http.statusCode == 200 || http.statusCode == 201),
@@ -370,7 +491,36 @@ public final class GoogleDriveService: NSObject, ObservableObject, ASWebAuthenti
         return sessionURL
     }
 
-    // MARK: - Upload Chunk
+    // MARK: - Check Resumable Upload Status (Error Recovery)
+    public func checkUploadStatus(sessionURL: URL, totalFileSize: Int64?) async throws -> (isComplete: Bool, nextOffset: Int64, fileID: String?) {
+        var request = URLRequest(url: sessionURL)
+        request.httpMethod = "PUT"
+        let totalStr = totalFileSize != nil ? "\(totalFileSize!)" : "*"
+        request.setValue("bytes */\(totalStr)", forHTTPHeaderField: "Content-Range")
+        request.setValue("0", forHTTPHeaderField: "Content-Length")
+
+        let (data, response) = try await URLSession.shared.data(for: request)
+        guard let http = response as? HTTPURLResponse else {
+            throw NSError(domain: "GoogleDrive", code: 500, userInfo: [NSLocalizedDescriptionKey: "No response from Google Drive status check."])
+        }
+
+        if http.statusCode == 200 || http.statusCode == 201 {
+            let fileID = (try? JSONSerialization.jsonObject(with: data) as? [String: Any])?["id"] as? String
+            return (true, 0, fileID)
+        } else if http.statusCode == 308 {
+            // Parse Range header e.g. "bytes=0-1048575"
+            if let rangeHeader = http.allHeaderFields["Range"] as? String ?? http.allHeaderFields["range"] as? String,
+               let lastByteStr = rangeHeader.components(separatedBy: "-").last,
+               let lastByte = Int64(lastByteStr) {
+                return (false, lastByte + 1, nil)
+            }
+            return (false, 0, nil)
+        } else {
+            throw NSError(domain: "GoogleDrive", code: http.statusCode, userInfo: [NSLocalizedDescriptionKey: "Upload status check failed with HTTP \(http.statusCode)"])
+        }
+    }
+
+    // MARK: - Upload Chunk with 308 Handling, 401 Re-Auth Retry, and Error Recovery
     public func uploadChunk(
         sessionURL: URL,
         chunkData: Data,
@@ -378,34 +528,71 @@ public final class GoogleDriveService: NSObject, ObservableObject, ASWebAuthenti
         isFinal: Bool,
         totalFileSize: Int64?
     ) async throws -> (isComplete: Bool, fileID: String?) {
-        var request = URLRequest(url: sessionURL)
-        request.httpMethod = "PUT"
-        request.httpBody = chunkData
+        var attempts = 0
+        let maxAttempts = 3
 
-        let endOffset = startOffset + Int64(chunkData.count) - 1
-        let totalStr = totalFileSize != nil ? "\(totalFileSize!)" : (isFinal ? "\(endOffset + 1)" : "*")
-        request.setValue("bytes \(startOffset)-\(endOffset)/\(totalStr)", forHTTPHeaderField: "Content-Range")
-        request.setValue("\(chunkData.count)", forHTTPHeaderField: "Content-Length")
+        while attempts < maxAttempts {
+            attempts += 1
 
-        let (data, response) = try await URLSession.shared.data(for: request)
-        guard let http = response as? HTTPURLResponse else {
-            throw NSError(domain: "GoogleDrive", code: 500, userInfo: [NSLocalizedDescriptionKey: "No response from Google Drive."])
-        }
+            var request = URLRequest(url: sessionURL)
+            request.httpMethod = "PUT"
+            request.httpBody = chunkData
 
-        if http.statusCode == 200 || http.statusCode == 201 {
-            // Upload Finished!
-            if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-               let fileID = json["id"] as? String {
-                return (true, fileID)
+            let endOffset = startOffset + Int64(chunkData.count) - 1
+            let totalStr: String
+            if let total = totalFileSize {
+                totalStr = "\(total)"
+            } else if isFinal {
+                totalStr = "\(endOffset + 1)"
+            } else {
+                totalStr = "*"
             }
-            return (true, nil)
-        } else if http.statusCode == 308 {
-            // Resume Incomplete (Chunk received successfully)
-            return (false, nil)
-        } else {
-            let msg = String(data: data, encoding: .utf8) ?? "Upload chunk error \(http.statusCode)"
-            throw NSError(domain: "GoogleDrive", code: http.statusCode, userInfo: [NSLocalizedDescriptionKey: msg])
+
+            request.setValue("bytes \(startOffset)-\(endOffset)/\(totalStr)", forHTTPHeaderField: "Content-Range")
+            request.setValue("\(chunkData.count)", forHTTPHeaderField: "Content-Length")
+
+            do {
+                let (data, response) = try await URLSession.shared.data(for: request)
+                guard let http = response as? HTTPURLResponse else {
+                    throw NSError(domain: "GoogleDrive", code: 500, userInfo: [NSLocalizedDescriptionKey: "No response from Google Drive."])
+                }
+
+                if http.statusCode == 200 || http.statusCode == 201 {
+                    // Upload Finished successfully
+                    if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                       let fileID = json["id"] as? String {
+                        return (true, fileID)
+                    }
+                    return (true, nil)
+                } else if http.statusCode == 308 {
+                    // 308 Resume Incomplete: Google successfully committed this chunk.
+                    return (false, nil)
+                } else if http.statusCode == 401 {
+                    // Token expired: refresh and retry
+                    _ = try await self.ensureValidToken()
+                    continue
+                } else if http.statusCode >= 500 {
+                    // Server error: check status and retry with exponential backoff
+                    try await Task.sleep(nanoseconds: UInt64(attempts) * 1_000_000_000)
+                    let status = try? await self.checkUploadStatus(sessionURL: sessionURL, totalFileSize: totalFileSize)
+                    if status?.isComplete == true {
+                        return (true, status?.fileID)
+                    }
+                    continue
+                } else {
+                    let msg = String(data: data, encoding: .utf8) ?? "Upload chunk error \(http.statusCode)"
+                    throw NSError(domain: "GoogleDrive", code: http.statusCode, userInfo: [NSLocalizedDescriptionKey: msg])
+                }
+            } catch {
+                if attempts >= maxAttempts {
+                    throw error
+                }
+                // Exponential backoff
+                try await Task.sleep(nanoseconds: UInt64(attempts) * 1_000_000_000)
+            }
         }
+
+        throw NSError(domain: "GoogleDrive", code: 500, userInfo: [NSLocalizedDescriptionKey: "Max chunk upload retries exceeded."])
     }
 
     // MARK: - List Cloud Backups
@@ -413,9 +600,14 @@ public final class GoogleDriveService: NSObject, ObservableObject, ASWebAuthenti
         let token = try await ensureValidToken()
         let folderID = try await getOrCreateAppFolder()
 
-        let query = "'\(folderID)' in parents and trashed = false"
-        guard let encodedQuery = query.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed),
-              let listURL = URL(string: "https://www.googleapis.com/drive/v3/files?q=\(encodedQuery)&fields=files(id,name,size,modifiedTime,mimeType)&orderBy=modifiedTime desc") else {
+        var components = URLComponents(string: "https://www.googleapis.com/drive/v3/files")!
+        components.queryItems = [
+            URLQueryItem(name: "q", value: "'\(folderID)' in parents and trashed = false"),
+            URLQueryItem(name: "fields", value: "files(id,name,size,modifiedTime,mimeType)"),
+            URLQueryItem(name: "orderBy", value: "modifiedTime desc")
+        ]
+
+        guard let listURL = components.url else {
             return []
         }
 
@@ -445,7 +637,7 @@ public final class GoogleDriveService: NSObject, ObservableObject, ASWebAuthenti
         }
     }
 
-    // MARK: - Download Cloud Backup to File
+    // MARK: - Download Cloud Backup to File with Progress
     public func downloadFile(
         file: GoogleDriveFile,
         destinationURL: URL,
@@ -459,13 +651,18 @@ public final class GoogleDriveService: NSObject, ObservableObject, ASWebAuthenti
         var request = URLRequest(url: downloadURL)
         request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
 
-        let (tempURL, res) = try await URLSession.shared.download(for: request)
-        guard let http = res as? HTTPURLResponse, http.statusCode == 200 else {
-            throw NSError(domain: "GoogleDrive", code: 500, userInfo: [NSLocalizedDescriptionKey: "Failed to download file from Google Drive."])
+        let delegate = DownloadProgressDelegate(onProgress: onProgress)
+        let session = URLSession(configuration: .default, delegate: delegate, delegateQueue: nil)
+
+        let downloadedTempURL = try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<URL, Error>) in
+            delegate.setContinuation(continuation)
+            let task = session.downloadTask(with: request)
+            task.resume()
         }
 
         try? FileManager.default.removeItem(at: destinationURL)
-        try FileManager.default.moveItem(at: tempURL, to: destinationURL)
+        try FileManager.default.createDirectory(at: destinationURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try FileManager.default.moveItem(at: downloadedTempURL, to: destinationURL)
         PosixHelper.shared.fixPermissions(at: destinationURL.path)
     }
 
@@ -481,22 +678,30 @@ public final class GoogleDriveService: NSObject, ObservableObject, ASWebAuthenti
         _ = try await URLSession.shared.data(for: request)
     }
 
-    // MARK: - PKCE Utilities
-    private func generateCodeVerifier() -> String {
+    // MARK: - PKCE Utilities (RFC 7636 Section 4)
+    private func generateCodeVerifier() -> String? {
+        // RFC 7636 4.1: code_verifier high-entropy cryptographic random string, min 43 chars, max 128 chars.
+        // 32 random bytes = 256 bits of entropy = 43 base64url characters.
         var bytes = [UInt8](repeating: 0, count: 32)
-        _ = SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes)
+        let status = SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes)
+        guard status == errSecSuccess else { return nil }
+
         return Data(bytes).base64EncodedString()
             .replacingOccurrences(of: "+", with: "-")
             .replacingOccurrences(of: "/", with: "_")
             .replacingOccurrences(of: "=", with: "")
     }
 
-    private func generateCodeChallenge(from verifier: String) -> String {
-        guard let data = verifier.data(using: .utf8) else { return "" }
-        var digest = [UInt8](repeating: 0, count: 32)
+    private func generateCodeChallenge(from verifier: String) -> String? {
+        // RFC 7636 4.2: code_challenge = BASE64URL-ENCODE(SHA256(ASCII(code_verifier)))
+        guard let data = verifier.data(using: .ascii), !data.isEmpty else { return nil }
+        var digest = [UInt8](repeating: 0, count: Int(CC_SHA256_DIGEST_LENGTH))
+
         data.withUnsafeBytes { buffer in
-            _ = CC_SHA256(buffer.baseAddress, CC_LONG(data.count), &digest)
+            guard let baseAddress = buffer.baseAddress else { return }
+            _ = CC_SHA256(baseAddress, CC_LONG(data.count), &digest)
         }
+
         return Data(digest).base64EncodedString()
             .replacingOccurrences(of: "+", with: "-")
             .replacingOccurrences(of: "/", with: "_")

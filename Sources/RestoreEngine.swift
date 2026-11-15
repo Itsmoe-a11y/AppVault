@@ -1,5 +1,6 @@
 import Foundation
 import UIKit
+import Darwin
 
 public final class RestoreEngine {
     public static let shared = RestoreEngine()
@@ -7,6 +8,198 @@ public final class RestoreEngine {
     private let fileManager = FileManager.default
 
     private init() {}
+
+    // MARK: - Fast Metadata Extractor (Zero Full Extraction Overhead)
+    public func extractMetadata(from archiveURL: URL) -> BackupRecord? {
+        guard fileManager.fileExists(atPath: archiveURL.path) else { return nil }
+        guard let handle = try? FileHandle(forReadingFrom: archiveURL) else { return nil }
+        defer { try? handle.close() }
+
+        guard let magic = try? handle.read(upToCount: 4), magic.count >= 2 else { return nil }
+        let isGzip = (magic[0] == 0x1f && magic[1] == 0x8b)
+
+        if isGzip {
+            // Seek back to start for decompression
+            try? handle.seek(toOffset: 0)
+            guard let decompressor = try? GzipDecompressor() else { return nil }
+            defer { decompressor.close() }
+
+            var metaData: Data? = nil
+            var buffer = Data()
+            var state: MetadataScanState = .seekingHeader
+            let bufferSize = 65536
+
+            enum MetadataScanState {
+                case seekingHeader
+                case readingData(remaining: Int64, collected: Data)
+                case found
+            }
+
+            while metaData == nil {
+                guard let chunk = try? handle.read(upToCount: bufferSize), !chunk.isEmpty else { break }
+
+                let endReached = (try? decompressor.decompress(data: chunk) { uncompressed in
+                    buffer.append(uncompressed)
+
+                    while metaData == nil && !buffer.isEmpty {
+                        switch state {
+                        case .seekingHeader:
+                            guard buffer.count >= 512 else { return }
+                            let block = buffer.prefix(512)
+                            buffer.removeFirst(512)
+
+                            // Check for zero block
+                            if block.allSatisfy({ $0 == 0 }) { continue }
+
+                            // Read header name & prefix
+                            func readString(offset: Int, len: Int) -> String {
+                                let slice = block.subdata(in: offset..<(offset + len))
+                                if let nullIdx = slice.firstIndex(of: 0) {
+                                    return String(decoding: slice.prefix(upTo: nullIdx), as: UTF8.self)
+                                }
+                                return String(decoding: slice, as: UTF8.self)
+                            }
+                            let name = readString(offset: 0, len: 100)
+                            let prefix = readString(offset: 345, len: 155)
+                            let fullName = prefix.isEmpty ? name : "\(prefix)/\(name)"
+
+                            let sizeStr = readString(offset: 124, len: 12)
+                                .trimmingCharacters(in: CharacterSet.whitespacesAndNewlines.union(CharacterSet(charactersIn: "\0")))
+                            let size = Int64(sizeStr, radix: 8) ?? 0
+
+                            if fullName.hasSuffix("BackupMetadata.plist") || name == "BackupMetadata.plist" {
+                                if size == 0 { return }
+                                state = .readingData(remaining: size, collected: Data())
+                            } else {
+                                // Skip payload + padding
+                                let pad = (512 - (Int(size) % 512)) % 512
+                                let totalSkip = Int(size) + pad
+                                if buffer.count >= totalSkip {
+                                    buffer.removeFirst(totalSkip)
+                                } else {
+                                    return
+                                }
+                            }
+
+                        case .readingData(var remaining, var collected):
+                            let toTake = min(Int64(buffer.count), remaining)
+                            collected.append(buffer.prefix(Int(toTake)))
+                            buffer.removeFirst(Int(toTake))
+                            remaining -= toTake
+
+                            if remaining == 0 {
+                                metaData = collected
+                                state = .found
+                                return
+                            } else {
+                                state = .readingData(remaining: remaining, collected: collected)
+                            }
+
+                        case .found:
+                            return
+                        }
+                    }
+                }) ?? false
+
+                if endReached || state == .found { break }
+            }
+
+            if let data = metaData, let record = try? PropertyListDecoder().decode(BackupRecord.self, from: data) {
+                return record
+            }
+        }
+
+        // Fallback for PKZip archives
+        let tempMetaDir = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("Meta_\(UUID().uuidString)")
+        defer { try? fileManager.removeItem(at: tempMetaDir) }
+        try? fileManager.createDirectory(at: tempMetaDir, withIntermediateDirectories: true)
+
+        let extracted = PosixHelper.shared.dittoExtract(zipPath: archiveURL.path, destinationDir: tempMetaDir.path)
+        if extracted {
+            let metaURL = tempMetaDir.appendingPathComponent("BackupMetadata.plist")
+            if let data = try? Data(contentsOf: metaURL),
+               let record = try? PropertyListDecoder().decode(BackupRecord.self, from: data) {
+                return record
+            }
+        }
+
+        return nil
+    }
+
+    // MARK: - Extract Archive to Staging Directory
+    public func extractArchive(from archiveURL: URL, to stagingURL: URL) throws {
+        guard let handle = try? FileHandle(forReadingFrom: archiveURL) else {
+            throw NSError(
+                domain: "AppVault.RestoreEngine",
+                code: 501,
+                userInfo: [NSLocalizedDescriptionKey: "Failed to open archive file for reading: \(archiveURL.lastPathComponent)"]
+            )
+        }
+        defer { try? handle.close() }
+
+        guard let magic = try? handle.read(upToCount: 4), magic.count >= 2 else {
+            throw NSError(
+                domain: "AppVault.RestoreEngine",
+                code: 501,
+                userInfo: [NSLocalizedDescriptionKey: "Archive file is empty or unreadable."]
+            )
+        }
+
+        let isGzip = (magic[0] == 0x1f && magic[1] == 0x8b)
+        let isZip = (magic.count >= 4 && magic[0] == 0x50 && magic[1] == 0x4b && magic[2] == 0x03 && magic[3] == 0x04)
+
+        if isGzip {
+            // Streaming Gzip Tar Decompression & Extraction
+            try handle.seek(toOffset: 0)
+            let decompressor = try GzipDecompressor()
+            defer { decompressor.close() }
+
+            let tarExtractor = TarExtractor(destinationDir: stagingURL)
+            let bufferSize = 65536
+
+            while true {
+                guard let chunk = try? handle.read(upToCount: bufferSize), !chunk.isEmpty else {
+                    break
+                }
+
+                let endReached = try decompressor.decompress(data: chunk) { uncompressed in
+                    try tarExtractor.feed(data: uncompressed)
+                }
+
+                if endReached {
+                    break
+                }
+            }
+
+            try tarExtractor.finish()
+            return
+        }
+
+        if isZip {
+            // Legacy / PKZip archive extraction via Apple ditto
+            let extracted = PosixHelper.shared.dittoExtract(zipPath: archiveURL.path, destinationDir: stagingURL.path)
+            guard extracted else {
+                throw NSError(
+                    domain: "AppVault.RestoreEngine",
+                    code: 501,
+                    userInfo: [NSLocalizedDescriptionKey: "ditto extraction failed on PKZip archive."]
+                )
+            }
+            return
+        }
+
+        // Uncompressed POSIX Tar format
+        try handle.seek(toOffset: 0)
+        let tarExtractor = TarExtractor(destinationDir: stagingURL)
+        let bufferSize = 65536
+        while true {
+            guard let chunk = try? handle.read(upToCount: bufferSize), !chunk.isEmpty else {
+                break
+            }
+            try tarExtractor.feed(data: chunk)
+        }
+        try tarExtractor.finish()
+    }
 
     // MARK: - Restore from Archive URL
     public func restore(
@@ -24,32 +217,32 @@ public final class RestoreEngine {
         progress(OperationProgress(
             stage: "Extracting Archive",
             fractionCompleted: 0.15,
-            statusDetail: "Unpacking backup package..."
+            statusDetail: "Decompressing and unpacking backup package..."
         ))
 
         try? fileManager.removeItem(at: stagingURL)
         try fileManager.createDirectory(at: stagingURL, withIntermediateDirectories: true)
 
-        let extracted = PosixHelper.shared.dittoExtract(
-            zipPath: archiveURL.path,
-            destinationDir: stagingURL.path
-        )
-
-        guard extracted else {
+        do {
+            try extractArchive(from: archiveURL, to: stagingURL)
+        } catch {
             throw NSError(
                 domain: "AppVault.RestoreEngine",
                 code: 501,
-                userInfo: [NSLocalizedDescriptionKey: "Failed to extract archive. File may be corrupted."]
+                userInfo: [NSLocalizedDescriptionKey: "Failed to extract archive: \(error.localizedDescription)"]
             )
         }
 
-        // Locate inner staging if ditto preserved outer folder
+        // Locate inner staging directory if archive preserved outer directory container
         var contentDir = stagingURL
         if let subdirs = try? fileManager.contentsOfDirectory(at: stagingURL, includingPropertiesForKeys: nil),
            subdirs.count == 1,
            let first = subdirs.first,
            (try? first.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true {
-            contentDir = first
+            let innerMeta = first.appendingPathComponent("BackupMetadata.plist")
+            if fileManager.fileExists(atPath: innerMeta.path) {
+                contentDir = first
+            }
         }
 
         // MARK: 1. Parse Metadata
@@ -65,7 +258,7 @@ public final class RestoreEngine {
             throw NSError(
                 domain: "AppVault.RestoreEngine",
                 code: 502,
-                userInfo: [NSLocalizedDescriptionKey: "Backup metadata missing or invalid format."]
+                userInfo: [NSLocalizedDescriptionKey: "Backup metadata missing or invalid format in archive."]
             )
         }
 
@@ -89,7 +282,7 @@ public final class RestoreEngine {
         let installedApps = AppDiscoveryService.shared.fetchInstalledApps()
         let targetApp = installedApps.first(where: { $0.bundleIdentifier == record.bundleIdentifier })
 
-        // Check if app bundle needs to be installed first
+        // Check if app bundle needs to be installed first via TrollStore
         if targetApp == nil {
             let payloadDir = contentDir.appendingPathComponent("Payload", isDirectory: true)
             if let items = try? fileManager.contentsOfDirectory(at: payloadDir, includingPropertiesForKeys: nil),
@@ -103,7 +296,7 @@ public final class RestoreEngine {
                 throw NSError(
                     domain: "AppVault.RestoreEngine",
                     code: 201,
-                    userInfo: [NSLocalizedDescriptionKey: "\(record.appName) was not installed. Dispatched installation to TrollStore. Please re-run restore once installation finishes."]
+                    userInfo: [NSLocalizedDescriptionKey: "\(record.appName) is not installed. Dispatched installation to TrollStore. Please re-run restore once installation finishes."]
                 )
             } else {
                 throw NSError(
@@ -175,6 +368,15 @@ public final class RestoreEngine {
                 }
             }
 
+            // SystemData (if present)
+            let srcSystemData = backupDataDir.appendingPathComponent("SystemData")
+            if fileManager.fileExists(atPath: srcSystemData.path) {
+                let destSystemData = dataContainer.appendingPathComponent("SystemData")
+                try? fileManager.removeItem(at: destSystemData)
+                try? fileManager.copyItem(at: srcSystemData, to: destSystemData)
+            }
+
+            // Recursively repair permissions (mobile:mobile 501:501, dirs 0755, files 0644/0755)
             PosixHelper.shared.fixPermissions(at: dataContainer.path, uid: 501, gid: 501)
         }
 
@@ -200,6 +402,7 @@ public final class RestoreEngine {
                         try? fileManager.copyItem(at: src, to: dest)
                     }
 
+                    // Recursively repair permissions on shared group container
                     PosixHelper.shared.fixPermissions(at: currentGroupURL.path, uid: 501, gid: 501)
                 }
             }
@@ -214,6 +417,9 @@ public final class RestoreEngine {
                 print("[RestoreEngine] Successfully restored \(restored) keychain credentials.")
             }
         }
+
+        // Invalidate app container discovery cache so newly restored apps/groups reflect immediately
+        AppDiscoveryService.shared.invalidateCache()
 
         progress(OperationProgress(
             stage: "Completed",

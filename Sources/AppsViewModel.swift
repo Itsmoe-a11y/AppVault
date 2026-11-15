@@ -2,24 +2,85 @@ import Foundation
 import SwiftUI
 import Combine
 
+public enum AppListSheet: Identifiable {
+    case backup(InstalledApp)
+    case explore(InstalledApp)
+    case batchBackup([InstalledApp])
+
+    public var id: String {
+        switch self {
+        case .backup(let a): return "backup_\(a.bundleIdentifier)"
+        case .explore(let a): return "explore_\(a.bundleIdentifier)"
+        case .batchBackup(let arr): return "batch_\(arr.map { $0.bundleIdentifier }.joined(separator: "_"))"
+        }
+    }
+}
+
 @MainActor
 public final class AppsViewModel: ObservableObject {
     @Published public var apps: [InstalledApp] = []
     @Published public var searchQuery: String = ""
     @Published public var showSystemApps: Bool = false
     @Published public var isScanning: Bool = false
-    @Published public var backupTargetApp: InstalledApp? = nil
-    @Published public var exploreTargetApp: InstalledApp? = nil
+
+    // Unified Sheet Presentation to avoid iOS 15 multi-sheet collisions
+    @Published public var activeSheet: AppListSheet? = nil
 
     // Batch Multi-Selection Mode
     @Published public var isSelectionMode: Bool = false
     @Published public var selectedAppIDs: Set<String> = []
-    @Published public var showBatchBackupSheet: Bool = false
 
-    private var cancellables = Set<AnyCancellable>()
+    // Backwards compatibility properties
+    public var backupTargetApp: InstalledApp? {
+        get {
+            if case .backup(let app) = activeSheet { return app }
+            return nil
+        }
+        set {
+            if let val = newValue {
+                activeSheet = .backup(val)
+            } else if case .backup = activeSheet {
+                activeSheet = nil
+            }
+        }
+    }
+
+    public var exploreTargetApp: InstalledApp? {
+        get {
+            if case .explore(let app) = activeSheet { return app }
+            return nil
+        }
+        set {
+            if let val = newValue {
+                activeSheet = .explore(val)
+            } else if case .explore = activeSheet {
+                activeSheet = nil
+            }
+        }
+    }
+
+    public var showBatchBackupSheet: Bool {
+        get {
+            if case .batchBackup = activeSheet { return true }
+            return false
+        }
+        set {
+            if newValue {
+                activeSheet = .batchBackup(selectedApps)
+            } else if case .batchBackup = activeSheet {
+                activeSheet = nil
+            }
+        }
+    }
+
+    private var scanTask: Task<Void, Never>? = nil
 
     public init() {
         refreshApps()
+    }
+
+    deinit {
+        scanTask?.cancel()
     }
 
     public var filteredApps: [InstalledApp] {
@@ -27,11 +88,12 @@ public final class AppsViewModel: ObservableObject {
             let matchesScope = showSystemApps ? true : !app.isSystemApp
             guard matchesScope else { return false }
 
-            if searchQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            let trimmed = searchQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+            if trimmed.isEmpty {
                 return true
             }
 
-            let q = searchQuery.lowercased()
+            let q = trimmed.lowercased()
             return app.name.lowercased().contains(q) ||
                    app.bundleIdentifier.lowercased().contains(q)
         }
@@ -58,16 +120,27 @@ public final class AppsViewModel: ObservableObject {
     }
 
     public func refreshApps() {
+        scanTask?.cancel()
         isScanning = true
-        Task.detached(priority: .userInitiated) {
+
+        scanTask = Task.detached(priority: .userInitiated) {
             let discovered = AppDiscoveryService.shared.fetchInstalledApps()
+            guard !Task.isCancelled else { return }
+
             await MainActor.run {
                 self.apps = discovered
-                self.isScanning = false
+                // If there are no discovered apps, end scan state immediately
+                if discovered.isEmpty {
+                    self.isScanning = false
+                }
             }
 
+            // Calculate storage sizes in background without blocking UI
             for app in discovered {
+                guard !Task.isCancelled else { break }
                 let sizes = AppDiscoveryService.shared.calculateAppSizes(for: app)
+                guard !Task.isCancelled else { break }
+
                 await MainActor.run {
                     if let index = self.apps.firstIndex(where: { $0.bundleIdentifier == app.bundleIdentifier }) {
                         self.apps[index].appSizeBytes = sizes.appSize
@@ -75,6 +148,10 @@ public final class AppsViewModel: ObservableObject {
                         self.apps[index].groupSizeBytes = sizes.groupSize
                     }
                 }
+            }
+
+            await MainActor.run {
+                self.isScanning = false
             }
         }
     }

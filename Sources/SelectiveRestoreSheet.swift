@@ -10,6 +10,10 @@ public struct SelectiveRestoreOptions {
     public var restoreCaches: Bool = false
 
     public init() {}
+
+    public var hasAnySelected: Bool {
+        restoreDocuments || restorePreferences || restoreAppSupport || restoreAppGroups || restoreKeychain || restoreCaches
+    }
 }
 
 // MARK: - Selective Restore Sheet
@@ -28,11 +32,12 @@ public struct SelectiveRestoreSheet: View {
     public var body: some View {
         NavigationView {
             Form {
+                // Section 1: Target Info
                 Section(header: Text("Target Application")) {
                     HStack(spacing: 14) {
-                        Image(systemName: "shippingbox.fill")
+                        Image(systemName: record.mode == .full ? "shippingbox.fill" : "internaldrive.fill")
                             .font(.system(size: 28))
-                            .foregroundColor(.blue)
+                            .foregroundColor(record.mode == .full ? .purple : .blue)
 
                         VStack(alignment: .leading, spacing: 2) {
                             Text(record.appName)
@@ -40,7 +45,7 @@ public struct SelectiveRestoreSheet: View {
                             Text(record.bundleIdentifier)
                                 .font(.caption2)
                                 .foregroundColor(.secondary)
-                            Text("Created \(record.formattedDate) • \(record.formattedSize)")
+                            Text("Created \(record.formattedDate) \u{2022} \(record.formattedSize)")
                                 .font(.caption2)
                                 .foregroundColor(.secondary)
                         }
@@ -48,7 +53,22 @@ public struct SelectiveRestoreSheet: View {
                     .padding(.vertical, 4)
                 }
 
-                Section(header: Text("Select Components to Restore")) {
+                // Section 2: Component Selection Toggles
+                Section(header: HStack {
+                    Text("Select Components to Restore")
+                    Spacer()
+                    Button(options.hasAnySelected ? "Deselect All" : "Select All") {
+                        let targetState = !options.hasAnySelected
+                        options.restoreDocuments = targetState
+                        options.restorePreferences = targetState
+                        options.restoreAppSupport = targetState
+                        options.restoreAppGroups = targetState
+                        options.restoreKeychain = targetState
+                        options.restoreCaches = false
+                    }
+                    .font(.caption)
+                    .textCase(.none)
+                }) {
                     Toggle(isOn: $options.restoreDocuments) {
                         Label("User Documents", systemImage: "doc.text.fill")
                     }
@@ -76,6 +96,7 @@ public struct SelectiveRestoreSheet: View {
                     }
                 }
 
+                // Section 3: Restore Button
                 Section {
                     Button(action: {
                         presentationMode.wrappedValue.dismiss()
@@ -90,7 +111,15 @@ public struct SelectiveRestoreSheet: View {
                         }
                         .padding(.vertical, 6)
                     }
-                    .listRowBackground(Color.blue)
+                    .disabled(!options.hasAnySelected)
+                    .listRowBackground(options.hasAnySelected ? Color.blue : Color.gray)
+
+                    if !options.hasAnySelected {
+                        Text("Please select at least one component to restore.")
+                            .font(.caption2)
+                            .foregroundColor(.orange)
+                            .frame(maxWidth: .infinity, alignment: .center)
+                    }
                 }
             }
             .navigationTitle("Selective Restore")

@@ -94,17 +94,22 @@ public struct BackupsListView: View {
             )) { item in
                 ShareSheet(activityItems: [item.url])
             }
+            .sheet(item: $backupsVM.restoreConfirmationRecord) { record in
+                SelectiveRestoreSheet(record: record) { options in
+                    backupsVM.startRestore(record: record, options: options)
+                }
+            }
+            .sheet(item: $backupsVM.renameTargetRecord) { target in
+                RenameBackupSheet(record: target) { newName in
+                    backupsVM.renameBackup(target, to: newName)
+                }
+            }
             .alert(isPresented: $backupsVM.showAlert) {
                 Alert(
                     title: Text(backupsVM.alertTitle),
                     message: Text(backupsVM.alertMessage),
                     dismissButton: .default(Text("OK"))
                 )
-            }
-            .sheet(item: $backupsVM.restoreConfirmationRecord) { record in
-                SelectiveRestoreSheet(record: record) { options in
-                    backupsVM.startRestore(record: record, options: options)
-                }
             }
             .actionSheet(item: $backupsVM.restoreConfirmationCloudFile) { file in
                 ActionSheet(
@@ -121,7 +126,7 @@ public struct BackupsListView: View {
             .actionSheet(item: $deleteTarget) { target in
                 ActionSheet(
                     title: Text("Delete Backup?"),
-                    message: Text("Are you sure you want to permanently delete the backup archive for \(target.appName)?"),
+                    message: Text("Are you sure you want to permanently delete the backup archive '\(target.archiveFileName)'?"),
                     buttons: [
                         .destructive(Text("Delete Archive")) {
                             backupsVM.deleteBackup(target)
@@ -178,6 +183,9 @@ public struct BackupsListView: View {
                             },
                             onShare: {
                                 backupsVM.exportURL = backupsVM.fileURL(for: record)
+                            },
+                            onRename: {
+                                backupsVM.renameTargetRecord = record
                             },
                             onDelete: {
                                 deleteTarget = record
@@ -274,6 +282,78 @@ struct URLItem: Identifiable {
     let url: URL
 }
 
+// MARK: - Rename Backup Sheet
+struct RenameBackupSheet: View {
+    let record: BackupRecord
+    let onRename: (String) -> Void
+    @Environment(\.presentationMode) var presentationMode
+
+    @State private var inputName: String = ""
+
+    init(record: BackupRecord, onRename: @escaping (String) -> Void) {
+        self.record = record
+        self.onRename = onRename
+        let baseName = (record.archiveFileName as NSString).deletingPathExtension
+        _inputName = State(initialValue: baseName)
+    }
+
+    var body: some View {
+        NavigationView {
+            Form {
+                Section(header: Text("Current Archive")) {
+                    Text(record.archiveFileName)
+                        .font(.system(size: 13, design: .monospaced))
+                        .foregroundColor(.secondary)
+                    HStack {
+                        Text("Application:")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                        Text(record.appName)
+                            .font(.system(size: 13, weight: .semibold))
+                    }
+                }
+
+                Section(header: Text("New Name"), footer: Text("Characters like / : \\ ? * < > will be replaced with underscores.")) {
+                    TextField("Enter new file name", text: $inputName)
+                        .font(.system(size: 14, design: .monospaced))
+                        .autocapitalization(.none)
+                        .disableAutocorrection(true)
+
+                    let ext = (record.archiveFileName as NSString).pathExtension
+                    let preview = inputName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "" : "\(inputName).\(ext.isEmpty ? "adbk" : ext)"
+                    if !preview.isEmpty {
+                        HStack {
+                            Text("Will be saved as:")
+                                .font(.caption2)
+                                .foregroundColor(.secondary)
+                            Text(preview)
+                                .font(.system(size: 11, design: .monospaced))
+                                .foregroundColor(.blue)
+                        }
+                    }
+                }
+            }
+            .navigationTitle("Rename Backup")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") { presentationMode.wrappedValue.dismiss() }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Save") {
+                        let trimmed = inputName.trimmingCharacters(in: .whitespacesAndNewlines)
+                        if !trimmed.isEmpty {
+                            presentationMode.wrappedValue.dismiss()
+                            onRename(trimmed)
+                        }
+                    }
+                    .disabled(inputName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                }
+            }
+        }
+    }
+}
+
 // MARK: - Cloud Backup Card View
 struct CloudBackupCardView: View {
     let file: GoogleDriveFile
@@ -296,7 +376,7 @@ struct CloudBackupCardView: View {
                         .font(.headline)
                         .lineLimit(1)
 
-                    Text("Google Drive • AppVault Backups")
+                    Text("Google Drive \u{2022} AppVault Backups")
                         .font(.caption2)
                         .foregroundColor(.secondary)
                 }
@@ -361,6 +441,7 @@ struct BackupCardView: View {
     let record: BackupRecord
     let onRestore: () -> Void
     let onShare: () -> Void
+    let onRename: () -> Void
     let onDelete: () -> Void
 
     var body: some View {
@@ -378,8 +459,8 @@ struct BackupCardView: View {
                         .font(.headline)
                         .lineLimit(1)
 
-                    Text(record.bundleIdentifier)
-                        .font(.caption2)
+                    Text(record.archiveFileName)
+                        .font(.system(size: 11, design: .monospaced))
                         .foregroundColor(.secondary)
                         .lineLimit(1)
                 }
@@ -428,6 +509,13 @@ struct BackupCardView: View {
 
                 Spacer()
 
+                Button(action: onRename) {
+                    Image(systemName: "pencil")
+                        .font(.subheadline)
+                        .foregroundColor(.secondary)
+                }
+                .buttonStyle(BorderlessButtonStyle())
+
                 Button(action: onShare) {
                     Label("Export", systemImage: "square.and.arrow.up")
                         .font(.subheadline)
@@ -445,5 +533,20 @@ struct BackupCardView: View {
             .padding(.top, 2)
         }
         .padding(.vertical, 4)
+        .contextMenu {
+            Button(action: onRestore) {
+                Label("Restore Backup", systemImage: "arrow.counterclockwise")
+            }
+            Button(action: onRename) {
+                Label("Rename Archive", systemImage: "pencil")
+            }
+            Button(action: onShare) {
+                Label("Export / Share", systemImage: "square.and.arrow.up")
+            }
+            Divider()
+            Button(role: .destructive, action: onDelete) {
+                Label("Delete Archive", systemImage: "trash")
+            }
+        }
     }
 }

@@ -68,8 +68,8 @@ public struct AppsListView: View {
                                 isSelectionMode: appsVM.isSelectionMode,
                                 isSelected: appsVM.selectedAppIDs.contains(app.bundleIdentifier),
                                 onToggleSelect: { appsVM.toggleSelection(for: app) },
-                                onBackupTap: { appsVM.backupTargetApp = app },
-                                onExploreTap: { appsVM.exploreTargetApp = app }
+                                onBackupTap: { appsVM.activeSheet = .backup(app) },
+                                onExploreTap: { appsVM.activeSheet = .explore(app) }
                             )
                         }
                     }
@@ -89,7 +89,9 @@ public struct AppsListView: View {
 
                             Spacer()
 
-                            Button(action: { appsVM.showBatchBackupSheet = true }) {
+                            Button(action: {
+                                appsVM.activeSheet = .batchBackup(appsVM.selectedApps)
+                            }) {
                                 HStack(spacing: 6) {
                                     Image(systemName: "square.and.arrow.down.on.square.fill")
                                     Text("Batch Backup")
@@ -132,18 +134,19 @@ public struct AppsListView: View {
                     }
                 }
             }
-            .sheet(item: $appsVM.backupTargetApp) { target in
-                BackupDetailSheet(app: target)
-                    .environmentObject(backupsVM)
-            }
-            .sheet(item: $appsVM.exploreTargetApp) { target in
-                NavigationView {
-                    DataExplorerView(app: target)
+            .sheet(item: $appsVM.activeSheet) { sheet in
+                switch sheet {
+                case .backup(let target):
+                    BackupDetailSheet(app: target)
+                        .environmentObject(backupsVM)
+                case .explore(let target):
+                    NavigationView {
+                        DataExplorerView(app: target)
+                    }
+                case .batchBackup(let targetApps):
+                    BatchBackupSheet(apps: targetApps)
+                        .environmentObject(backupsVM)
                 }
-            }
-            .sheet(isPresented: $appsVM.showBatchBackupSheet) {
-                BatchBackupSheet(apps: appsVM.selectedApps)
-                    .environmentObject(backupsVM)
             }
         }
         .navigationViewStyle(StackNavigationViewStyle())
@@ -203,7 +206,7 @@ struct AppRowView: View {
                         .foregroundColor(.secondary)
 
                     if app.dataSizeBytes > 0 {
-                        Text("• Data: \(ByteCountFormatter.string(fromByteCount: app.dataSizeBytes, countStyle: .file))")
+                        Text("\u{2022} Data: \(ByteCountFormatter.string(fromByteCount: app.dataSizeBytes, countStyle: .file))")
                             .font(.system(size: 11))
                             .foregroundColor(.blue)
                     }

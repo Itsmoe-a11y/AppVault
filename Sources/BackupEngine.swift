@@ -11,6 +11,7 @@ public final class BackupEngine {
         let rootMobile = URL(fileURLWithPath: "/var/mobile/Documents/AppVault/Backups", isDirectory: true)
         if fileManager.isWritableFile(atPath: "/var/mobile/Documents") || fileManager.fileExists(atPath: rootMobile.path) {
             try? fileManager.createDirectory(at: rootMobile, withIntermediateDirectories: true)
+            PosixHelper.shared.fixPermissions(at: rootMobile.path)
             return rootMobile
         }
 
@@ -18,11 +19,13 @@ public final class BackupEngine {
         let docs = fileManager.urls(for: .documentDirectory, in: .userDomainMask).first!
         let localBackups = docs.appendingPathComponent("Backups", isDirectory: true)
         try? fileManager.createDirectory(at: localBackups, withIntermediateDirectories: true)
+        PosixHelper.shared.fixPermissions(at: localBackups.path)
         return localBackups
     }
 
     private init() {
         try? fileManager.createDirectory(at: backupsDirectory, withIntermediateDirectories: true)
+        PosixHelper.shared.fixPermissions(at: backupsDirectory.path)
     }
 
     // MARK: - 1. Zero-Staging Streaming Backup (Direct to Local File)
@@ -44,7 +47,14 @@ public final class BackupEngine {
         guard let writeHandle = try? FileHandle(forWritingTo: destinationURL) else {
             throw NSError(domain: "AppVault.BackupEngine", code: 500, userInfo: [NSLocalizedDescriptionKey: "Failed to open destination file handle for streaming."])
         }
-        defer { try? writeHandle.close() }
+
+        var isSuccess = false
+        defer {
+            try? writeHandle.close()
+            if !isSuccess {
+                try? fileManager.removeItem(at: destinationURL)
+            }
+        }
 
         var totalWritten: Int64 = 0
 
@@ -55,10 +65,11 @@ public final class BackupEngine {
             note: note,
             onProgress: progress
         ) { chunk in
-            try? writeHandle.write(contentsOf: chunk)
+            try writeHandle.write(contentsOf: chunk)
             totalWritten += Int64(chunk.count)
         }
 
+        isSuccess = true
         PosixHelper.shared.fixPermissions(at: destinationURL.path)
         record.fileSizeBytes = totalWritten
 
@@ -161,7 +172,6 @@ public final class BackupEngine {
         note: String,
         progress: @escaping (OperationProgress) -> Void
     ) async throws -> BackupRecord {
-        // Automatically default to zero-staging streaming engine for speed & zero disk duplication!
         return try await createStreamingBackup(
             for: app,
             mode: mode,

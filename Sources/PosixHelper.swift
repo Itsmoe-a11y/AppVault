@@ -68,6 +68,9 @@ public final class PosixHelper {
         }
 
         let readHandle = FileHandle(fileDescriptor: pipedes[0], closeOnDealloc: true)
+        defer {
+            try? readHandle.close()
+        }
         let outputData = readHandle.readDataToEndOfFile()
         let outputString = String(data: outputData, encoding: .utf8) ?? ""
 
@@ -88,35 +91,58 @@ public final class PosixHelper {
 
     // MARK: - Fix Permissions Recursively (mobile:mobile 501:501)
     public func fixPermissions(at path: String, uid: uid_t = 501, gid: gid_t = 501) {
+        var rootSt = stat()
+        guard lstat(path, &rootSt) == 0 else { return }
+
         let fileManager = FileManager.default
-        guard fileManager.fileExists(atPath: path) else { return }
+        let isRootSymlink = (rootSt.st_mode & S_IFMT) == S_IFLNK
+        let isRootDir = (rootSt.st_mode & S_IFMT) == S_IFDIR
 
-        // 1. Native POSIX change on root path
-        chown(path, uid, gid)
-        chmod(path, 0o755)
+        // 1. Native POSIX change on root path without following symlinks
+        lchown(path, uid, gid)
+        if !isRootSymlink {
+            if isRootDir {
+                chmod(path, 0o755)
+            } else {
+                let isExec = (rootSt.st_mode & 0o111) != 0 || path.contains(".app/") || path.hasSuffix(".dylib")
+                chmod(path, isExec ? 0o755 : 0o644)
+            }
+        }
 
-        // 2. Iterate subpaths
+        // If root is a file or symlink, we're done with subpaths
+        guard isRootDir else { return }
+
+        // 2. Iterate subpaths safely without following directory symlinks
         if let enumerator = fileManager.enumerator(atPath: path) {
             while let subpath = enumerator.nextObject() as? String {
                 let fullPath = (path as NSString).appendingPathComponent(subpath)
-                chown(fullPath, uid, gid)
-                
-                var isDir: ObjCBool = false
-                if fileManager.fileExists(atPath: fullPath, isDirectory: &isDir) {
-                    if isDir.boolValue {
-                        chmod(fullPath, 0o755)
-                    } else {
-                        chmod(fullPath, 0o644)
-                    }
+                var st = stat()
+                guard lstat(fullPath, &st) == 0 else { continue }
+
+                let fileType = st.st_mode & S_IFMT
+
+                // Do not follow or chmod symlinks - only update ownership of the link itself
+                if fileType == S_IFLNK {
+                    lchown(fullPath, uid, gid)
+                    continue
+                }
+
+                lchown(fullPath, uid, gid)
+
+                if fileType == S_IFDIR {
+                    chmod(fullPath, 0o755)
+                } else if fileType == S_IFREG {
+                    let isExec = (st.st_mode & 0o111) != 0 || fullPath.contains(".app/") || fullPath.hasSuffix(".dylib")
+                    chmod(fullPath, isExec ? 0o755 : 0o644)
                 }
             }
         }
 
-        // 3. Fallback shell chown if available
+        // 3. Fallback shell chown with -h to prevent following symlinks outside destination
         if fileManager.fileExists(atPath: "/usr/sbin/chown") {
-            _ = execute("/usr/sbin/chown", arguments: ["-R", "\(uid):\(gid)", path])
+            _ = execute("/usr/sbin/chown", arguments: ["-R", "-h", "\(uid):\(gid)", path])
         } else if fileManager.fileExists(atPath: "/bin/chown") {
-            _ = execute("/bin/chown", arguments: ["-R", "\(uid):\(gid)", path])
+            _ = execute("/bin/chown", arguments: ["-R", "-h", "\(uid):\(gid)", path])
         }
     }
 
