@@ -1,0 +1,8 @@
+.DS_Store
+*.xcodeproj
+DerivedData/
+*.ipa
+*.tipa
+Payload/
+build/
+*.adbk

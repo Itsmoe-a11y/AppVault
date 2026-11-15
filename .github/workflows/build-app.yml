@@ -1,0 +1,111 @@
+name: Build AppVault (.ipa & .tipa)
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      upload_release:
+        description: 'Upload package to GitHub Release'
+        required: false
+        type: boolean
+        default: true
+      release_tag:
+        description: 'Release Tag (defaults to v1.0.0)'
+        required: false
+        type: string
+        default: 'v1.0.0'
+
+permissions:
+  contents: write
+
+jobs:
+  build_app:
+    name: Build AppVault iOS App
+    runs-on: macos-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Cache Homebrew
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/Library/Caches/Homebrew
+            /usr/local/Homebrew
+          key: brew-tools-${{ runner.os }}-xcodegen-ldid-v1
+          restore-keys: |
+            brew-tools-${{ runner.os }}-
+
+      - name: Install Build Toolchain
+        run: |
+          brew install xcodegen ldid
+
+      - name: Show Xcode & SDK Info
+        run: |
+          xcrun --sdk iphoneos --show-sdk-path
+          xcrun --sdk iphoneos --show-sdk-version
+
+      - name: Make Scripts Executable
+        run: |
+          chmod +x tools/*.sh
+
+      - name: Compile and Package AppVault
+        run: |
+          ./tools/build-app.sh "$GITHUB_WORKSPACE"
+
+      - name: Verify IPA Structure & Entitlements
+        run: |
+          echo "==> Verifying Packages:"
+          ls -lh "$GITHUB_WORKSPACE/AppVault.ipa" "$GITHUB_WORKSPACE/AppVault.tipa"
+          
+          echo "==> Verifying Mach-O entitlements:"
+          mkdir -p /tmp/verify
+          unzip -q "$GITHUB_WORKSPACE/AppVault.ipa" -d /tmp/verify
+          ldid -e /tmp/verify/Payload/AppVault.app/AppVault
+          
+          if ! ldid -e /tmp/verify/Payload/AppVault.app/AppVault | grep -q "application-identifier"; then
+            echo "FATAL: Entitlements missing from final binary!" >&2
+            exit 1
+          fi
+          echo "SUCCESS: AppVault binary verified with valid entitlements."
+
+      - name: Upload Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: AppVault-Packages
+          path: |
+            AppVault.ipa
+            AppVault.tipa
+          if-no-files-found: error
+
+      - name: Publish GitHub Release
+        if: ${{ github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && github.event.inputs.upload_release == 'true') }}
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.release_tag || 'v1.0.0' }}
+          name: "AppVault ${{ github.event.inputs.release_tag || 'v1.0.0' }}"
+          body: |
+            ## AppVault v1.0.0 - Native iOS App & AppData Backup / Restore
+            
+            AppVault is an unsandboxed application for **TrollStore** and **jailbroken** iOS devices (iOS 14.0 - 17.0+) designed to create complete, 100% faithful backups of installed iOS apps and their internal data containers.
+
+            ### Features:
+            - **Full App Backups**: Backs up the `.app` bundle, full data container (`Documents`, `Library/Preferences`, `Application Support`), and shared App Groups.
+            - **Data-Only Backups**: Fast, lightweight backups capturing saved logins, game saves, and local databases.
+            - **One-Tap Restore**: Restores data directly into app containers, automatically terminating running processes and repairing POSIX ownership to `mobile:mobile` (501:501).
+            - **App Groups Preservation**: Complete restoration of shared group containers (crucial for WhatsApp, Telegram, Discord, etc.).
+            - **AirDrop & File Export**: Export archives (`.adbk` / `.zip`) directly via iOS Share Sheet or import external archives with the Document Picker.
+
+            ### Installation:
+            - **TrollStore**: Download `AppVault.tipa` (or `AppVault.ipa`) and open in TrollStore.
+          files: |
+            AppVault.ipa
+            AppVault.tipa
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
