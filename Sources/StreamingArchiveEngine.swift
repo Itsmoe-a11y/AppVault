@@ -142,19 +142,27 @@ struct TarHeader {
 
 // MARK: - Streaming Gzip Compressor (zlib deflate)
 final class GzipStreamWriter {
-    private var stream = z_stream()
+    private let streamPtr: UnsafeMutablePointer<z_stream>
+    private let outBufferPtr: UnsafeMutablePointer<UInt8>
+    private let outBufferSize: Int = 65536
     private var isOpen = false
     private let onChunk: (Data) async throws -> Void
-    private var outBuffer = [UInt8](repeating: 0, count: 65536)
 
     init(onChunk: @escaping (Data) async throws -> Void) throws {
         self.onChunk = onChunk
-        stream.zalloc = nil
-        stream.zfree = nil
-        stream.opaque = nil
+        streamPtr = UnsafeMutablePointer<z_stream>.allocate(capacity: 1)
+        streamPtr.initialize(to: z_stream())
+        streamPtr.pointee.zalloc = nil
+        streamPtr.pointee.zfree = nil
+        streamPtr.pointee.opaque = nil
 
-        let ret = deflateInit2_(&stream, Z_DEFAULT_COMPRESSION, Z_DEFLATED, 15 + 16, 8, Z_DEFAULT_STRATEGY, ZLIB_VERSION, Int32(MemoryLayout<z_stream>.size))
+        outBufferPtr = UnsafeMutablePointer<UInt8>.allocate(capacity: outBufferSize)
+
+        let ret = deflateInit2_(streamPtr, Z_DEFAULT_COMPRESSION, Z_DEFLATED, 15 + 16, 8, Z_DEFAULT_STRATEGY, ZLIB_VERSION, Int32(MemoryLayout<z_stream>.size))
         guard ret == Z_OK else {
+            streamPtr.deinitialize(count: 1)
+            streamPtr.deallocate()
+            outBufferPtr.deallocate()
             throw NSError(domain: "AppVault.Streaming", code: Int(ret), userInfo: [NSLocalizedDescriptionKey: "Failed to initialize zlib deflate stream: \(ret)"])
         }
         isOpen = true
@@ -162,9 +170,12 @@ final class GzipStreamWriter {
 
     deinit {
         if isOpen {
-            deflateEnd(&stream)
+            deflateEnd(streamPtr)
             isOpen = false
         }
+        streamPtr.deinitialize(count: 1)
+        streamPtr.deallocate()
+        outBufferPtr.deallocate()
     }
 
     func write(data: Data) async throws {
@@ -173,24 +184,21 @@ final class GzipStreamWriter {
         var chunksToEmit: [Data] = []
         try data.withUnsafeBytes { rawBuffer in
             guard let basePtr = rawBuffer.bindMemory(to: UInt8.self).baseAddress else { return }
-            stream.next_in = UnsafeMutablePointer(mutating: basePtr)
-            stream.avail_in = uInt(data.count)
+            streamPtr.pointee.next_in = UnsafeMutablePointer(mutating: basePtr)
+            streamPtr.pointee.avail_in = uInt(data.count)
 
-            while stream.avail_in > 0 {
-                try outBuffer.withUnsafeMutableBytes { outRaw in
-                    guard let outPtr = outRaw.bindMemory(to: UInt8.self).baseAddress else { return }
-                    stream.next_out = outPtr
-                    stream.avail_out = uInt(outBuffer.count)
+            while streamPtr.pointee.avail_in > 0 {
+                streamPtr.pointee.next_out = outBufferPtr
+                streamPtr.pointee.avail_out = uInt(outBufferSize)
 
-                    let ret = deflate(&stream, Z_NO_FLUSH)
-                    if ret == Z_STREAM_ERROR {
-                        throw NSError(domain: "AppVault.Streaming", code: Int(ret), userInfo: [NSLocalizedDescriptionKey: "zlib deflate error: Z_STREAM_ERROR"])
-                    }
+                let ret = deflate(streamPtr, Z_NO_FLUSH)
+                if ret == Z_STREAM_ERROR {
+                    throw NSError(domain: "AppVault.Streaming", code: Int(ret), userInfo: [NSLocalizedDescriptionKey: "zlib deflate error: Z_STREAM_ERROR"])
+                }
 
-                    let have = outBuffer.count - Int(stream.avail_out)
-                    if have > 0 {
-                        chunksToEmit.append(Data(bytes: outPtr, count: have))
-                    }
+                let have = outBufferSize - Int(streamPtr.pointee.avail_out)
+                if have > 0 {
+                    chunksToEmit.append(Data(bytes: outBufferPtr, count: have))
                 }
             }
         }
@@ -203,38 +211,35 @@ final class GzipStreamWriter {
     func finish() async throws {
         guard isOpen else { return }
         defer {
-            deflateEnd(&stream)
+            deflateEnd(streamPtr)
             isOpen = false
         }
 
-        stream.avail_in = 0
-        stream.next_in = nil
+        streamPtr.pointee.avail_in = 0
+        streamPtr.pointee.next_in = nil
 
         var ret: Int32 = Z_OK
         while ret != Z_STREAM_END {
             var producedChunk: Data? = nil
 
-            try outBuffer.withUnsafeMutableBytes { outRaw in
-                guard let outPtr = outRaw.bindMemory(to: UInt8.self).baseAddress else { return }
-                stream.next_out = outPtr
-                stream.avail_out = uInt(outBuffer.count)
+            streamPtr.pointee.next_out = outBufferPtr
+            streamPtr.pointee.avail_out = uInt(outBufferSize)
 
-                ret = deflate(&stream, Z_FINISH)
-                if ret != Z_OK && ret != Z_STREAM_END && ret != Z_BUF_ERROR {
-                    throw NSError(domain: "AppVault.Streaming", code: Int(ret), userInfo: [NSLocalizedDescriptionKey: "zlib deflate finish error: \(ret)"])
-                }
+            ret = deflate(streamPtr, Z_FINISH)
+            if ret != Z_OK && ret != Z_STREAM_END && ret != Z_BUF_ERROR {
+                throw NSError(domain: "AppVault.Streaming", code: Int(ret), userInfo: [NSLocalizedDescriptionKey: "zlib deflate finish error: \(ret)"])
+            }
 
-                let have = outBuffer.count - Int(stream.avail_out)
-                if have > 0 {
-                    producedChunk = Data(bytes: outPtr, count: have)
-                }
+            let have = outBufferSize - Int(streamPtr.pointee.avail_out)
+            if have > 0 {
+                producedChunk = Data(bytes: outBufferPtr, count: have)
             }
 
             if let chunk = producedChunk {
                 try await onChunk(chunk)
             }
 
-            if ret == Z_BUF_ERROR && stream.avail_out > 0 {
+            if ret == Z_BUF_ERROR && streamPtr.pointee.avail_out > 0 {
                 break
             }
         }
@@ -243,18 +248,26 @@ final class GzipStreamWriter {
 
 // MARK: - Streaming Gzip Decompressor (zlib inflate)
 final class GzipDecompressor {
-    private var stream = z_stream()
+    private let streamPtr: UnsafeMutablePointer<z_stream>
+    private let outBufferPtr: UnsafeMutablePointer<UInt8>
+    private let outBufferSize: Int = 65536
     private var isOpen = false
-    private var outBuffer = [UInt8](repeating: 0, count: 65536)
 
     init() throws {
-        stream.zalloc = nil
-        stream.zfree = nil
-        stream.opaque = nil
+        streamPtr = UnsafeMutablePointer<z_stream>.allocate(capacity: 1)
+        streamPtr.initialize(to: z_stream())
+        streamPtr.pointee.zalloc = nil
+        streamPtr.pointee.zfree = nil
+        streamPtr.pointee.opaque = nil
+
+        outBufferPtr = UnsafeMutablePointer<UInt8>.allocate(capacity: outBufferSize)
 
         // 15 + 32 enables automatic gzip or zlib header decoding
-        let ret = inflateInit2_(&stream, 15 + 32, ZLIB_VERSION, Int32(MemoryLayout<z_stream>.size))
+        let ret = inflateInit2_(streamPtr, 15 + 32, ZLIB_VERSION, Int32(MemoryLayout<z_stream>.size))
         guard ret == Z_OK else {
+            streamPtr.deinitialize(count: 1)
+            streamPtr.deallocate()
+            outBufferPtr.deallocate()
             throw NSError(
                 domain: "AppVault.Streaming",
                 code: Int(ret),
@@ -265,10 +278,10 @@ final class GzipDecompressor {
     }
 
     deinit {
-        if isOpen {
-            inflateEnd(&stream)
-            isOpen = false
-        }
+        close()
+        streamPtr.deinitialize(count: 1)
+        streamPtr.deallocate()
+        outBufferPtr.deallocate()
     }
 
     /// Decompresses an input chunk and passes uncompressed bytes to onChunk.
@@ -279,69 +292,61 @@ final class GzipDecompressor {
 
         try data.withUnsafeBytes { rawBuffer in
             guard let basePtr = rawBuffer.bindMemory(to: UInt8.self).baseAddress else { return }
-            stream.next_in = UnsafeMutablePointer(mutating: basePtr)
-            stream.avail_in = uInt(data.count)
+            streamPtr.pointee.next_in = UnsafeMutablePointer(mutating: basePtr)
+            streamPtr.pointee.avail_in = uInt(data.count)
 
-            while stream.avail_in > 0 && !isStreamEnd {
-                var producedChunk: Data? = nil
+            while streamPtr.pointee.avail_in > 0 && !isStreamEnd {
+                streamPtr.pointee.next_out = outBufferPtr
+                streamPtr.pointee.avail_out = uInt(outBufferSize)
 
-                try outBuffer.withUnsafeMutableBytes { outRaw in
-                    guard let outPtr = outRaw.bindMemory(to: UInt8.self).baseAddress else { return }
-                    stream.next_out = outPtr
-                    stream.avail_out = uInt(outBuffer.count)
+                let ret = inflate(streamPtr, Z_NO_FLUSH)
 
-                    let ret = inflate(&stream, Z_NO_FLUSH)
-
-                    switch ret {
-                    case Z_OK:
-                        break
-                    case Z_STREAM_END:
-                        isStreamEnd = true
-                    case Z_BUF_ERROR:
-                        break
-                    case Z_DATA_ERROR:
-                        throw NSError(
-                            domain: "AppVault.Streaming",
-                            code: Int(ret),
-                            userInfo: [NSLocalizedDescriptionKey: "Corrupted gzip stream: Z_DATA_ERROR"]
-                        )
-                    case Z_STREAM_ERROR:
-                        throw NSError(
-                            domain: "AppVault.Streaming",
-                            code: Int(ret),
-                            userInfo: [NSLocalizedDescriptionKey: "Inconsistent zlib stream: Z_STREAM_ERROR"]
-                        )
-                    case Z_MEM_ERROR:
-                        throw NSError(
-                            domain: "AppVault.Streaming",
-                            code: Int(ret),
-                            userInfo: [NSLocalizedDescriptionKey: "Out of memory in zlib inflate: Z_MEM_ERROR"]
-                        )
-                    case Z_NEED_DICT:
-                        throw NSError(
-                            domain: "AppVault.Streaming",
-                            code: Int(ret),
-                            userInfo: [NSLocalizedDescriptionKey: "Zlib preset dictionary required: Z_NEED_DICT"]
-                        )
-                    default:
-                        throw NSError(
-                            domain: "AppVault.Streaming",
-                            code: Int(ret),
-                            userInfo: [NSLocalizedDescriptionKey: "Unexpected zlib inflate code: \(ret)"]
-                        )
-                    }
-
-                    let have = outBuffer.count - Int(stream.avail_out)
-                    if have > 0 {
-                        producedChunk = Data(bytes: outPtr, count: have)
-                    }
+                switch ret {
+                case Z_OK:
+                    break
+                case Z_STREAM_END:
+                    isStreamEnd = true
+                case Z_BUF_ERROR:
+                    break
+                case Z_DATA_ERROR:
+                    throw NSError(
+                        domain: "AppVault.Streaming",
+                        code: Int(ret),
+                        userInfo: [NSLocalizedDescriptionKey: "Corrupted gzip stream: Z_DATA_ERROR"]
+                    )
+                case Z_STREAM_ERROR:
+                    throw NSError(
+                        domain: "AppVault.Streaming",
+                        code: Int(ret),
+                        userInfo: [NSLocalizedDescriptionKey: "Inconsistent zlib stream: Z_STREAM_ERROR"]
+                    )
+                case Z_MEM_ERROR:
+                    throw NSError(
+                        domain: "AppVault.Streaming",
+                        code: Int(ret),
+                        userInfo: [NSLocalizedDescriptionKey: "Out of memory in zlib inflate: Z_MEM_ERROR"]
+                    )
+                case Z_NEED_DICT:
+                    throw NSError(
+                        domain: "AppVault.Streaming",
+                        code: Int(ret),
+                        userInfo: [NSLocalizedDescriptionKey: "Zlib preset dictionary required: Z_NEED_DICT"]
+                    )
+                default:
+                    throw NSError(
+                        domain: "AppVault.Streaming",
+                        code: Int(ret),
+                        userInfo: [NSLocalizedDescriptionKey: "Unexpected zlib inflate code: \(ret)"]
+                    )
                 }
 
-                if let chunk = producedChunk {
+                let have = outBufferSize - Int(streamPtr.pointee.avail_out)
+                if have > 0 {
+                    let chunk = Data(bytes: outBufferPtr, count: have)
                     try onChunk(chunk)
                 }
 
-                if stream.avail_out == uInt(outBuffer.count) && !isStreamEnd {
+                if streamPtr.pointee.avail_out == uInt(outBufferSize) && !isStreamEnd {
                     break
                 }
             }
@@ -352,7 +357,7 @@ final class GzipDecompressor {
 
     func close() {
         if isOpen {
-            inflateEnd(&stream)
+            inflateEnd(streamPtr)
             isOpen = false
         }
     }
