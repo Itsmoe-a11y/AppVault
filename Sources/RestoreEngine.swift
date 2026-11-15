@@ -29,7 +29,7 @@ public final class RestoreEngine {
             var state: MetadataScanState = .seekingHeader
             let bufferSize = 65536
 
-            enum MetadataScanState {
+            enum MetadataScanState: Equatable {
                 case seekingHeader
                 case readingData(remaining: Int64, collected: Data)
                 case found

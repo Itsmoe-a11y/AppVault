@@ -162,14 +162,13 @@ final class GzipStreamWriter {
     func write(data: Data) async throws {
         guard isOpen, !data.isEmpty else { return }
 
-        try await data.withUnsafeBytes { rawBuffer in
+        var chunksToEmit: [Data] = []
+        try data.withUnsafeBytes { rawBuffer in
             guard let basePtr = rawBuffer.bindMemory(to: UInt8.self).baseAddress else { return }
             stream.next_in = UnsafeMutablePointer(mutating: basePtr)
             stream.avail_in = uInt(data.count)
 
             while stream.avail_in > 0 {
-                var producedChunk: Data? = nil
-
                 try outBuffer.withUnsafeMutableBytes { outRaw in
                     guard let outPtr = outRaw.bindMemory(to: UInt8.self).baseAddress else { return }
                     stream.next_out = outPtr
@@ -182,14 +181,14 @@ final class GzipStreamWriter {
 
                     let have = outBuffer.count - Int(stream.avail_out)
                     if have > 0 {
-                        producedChunk = Data(bytes: outPtr, count: have)
+                        chunksToEmit.append(Data(bytes: outPtr, count: have))
                     }
                 }
-
-                if let chunk = producedChunk {
-                    try await onChunk(chunk)
-                }
             }
+        }
+
+        for chunk in chunksToEmit {
+            try await onChunk(chunk)
         }
     }
 
@@ -246,7 +245,7 @@ final class GzipDecompressor {
         stream.opaque = nil
 
         // 15 + 32 enables automatic gzip or zlib header decoding
-        let ret = inflateInit2_(&stream, 15 + 32)
+        let ret = inflateInit2_(&stream, 15 + 32, ZLIB_VERSION, Int32(MemoryLayout<z_stream>.size))
         guard ret == Z_OK else {
             throw NSError(
                 domain: "AppVault.Streaming",
@@ -365,6 +364,11 @@ final class TarExtractor {
         case completed
     }
 
+    private var isCompleted: Bool {
+        if case .completed = state { return true }
+        return false
+    }
+
     private var state: State = .readingHeader
     private var consecutiveZeroBlocks = 0
 
@@ -373,7 +377,7 @@ final class TarExtractor {
     }
 
     func feed(data: Data) throws {
-        guard state != .completed else { return }
+        guard !isCompleted else { return }
         buffer.append(data)
         try processBuffer()
     }
@@ -386,7 +390,7 @@ final class TarExtractor {
     }
 
     private func processBuffer() throws {
-        while !buffer.isEmpty && state != .completed {
+        while !buffer.isEmpty && !isCompleted {
             switch state {
             case .readingHeader:
                 guard buffer.count >= 512 else { return }

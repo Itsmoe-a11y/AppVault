@@ -55,8 +55,6 @@ public final class KeychainService {
                 kSecReturnData as String: false,
                 kSecUseAuthenticationUI as String: kSecUseAuthenticationUISkip
             ]
-            // Backward compatibility for iOS < 13
-            metaQuery[kSecUseNoAuthenticationUI as String] = true as CFBoolean
 
             var metaResult: AnyObject?
             let metaStatus = SecItemCopyMatching(metaQuery as CFDictionary, &metaResult)
@@ -87,7 +85,6 @@ public final class KeychainService {
                     kSecReturnData as String: true,
                     kSecUseAuthenticationUI as String: kSecUseAuthenticationUISkip
                 ]
-                itemQuery[kSecUseNoAuthenticationUI as String] = true as CFBoolean
 
                 if let account = account, !account.isEmpty {
                     itemQuery[kSecAttrAccount as String] = account

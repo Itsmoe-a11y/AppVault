@@ -11,7 +11,7 @@ public final class LocalWebServer: ObservableObject {
 
     private var listener: NWListener?
     private let port: NWEndpoint.Port = 8080
-    private var activeConnections: Set<NWConnection> = []
+    private var activeConnections: [ObjectIdentifier: NWConnection] = [:]
     private let connectionQueue = DispatchQueue(label: "dev.moe.appvault.webserver.connection", qos: .userInitiated)
 
     // Limits for security and stability
@@ -71,7 +71,7 @@ public final class LocalWebServer: ObservableObject {
     public func stop() {
         connectionQueue.async { [weak self] in
             guard let self = self else { return }
-            for connection in self.activeConnections {
+            for connection in self.activeConnections.values {
                 connection.cancel()
             }
             self.activeConnections.removeAll()
@@ -90,7 +90,7 @@ public final class LocalWebServer: ObservableObject {
     // MARK: - Connection Handler & State Management
     private func handleConnection(_ connection: NWConnection) {
         connectionQueue.async {
-            self.activeConnections.insert(connection)
+            self.activeConnections[ObjectIdentifier(connection)] = connection
         }
 
         connection.stateUpdateHandler = { [weak self, weak connection] state in
@@ -109,7 +109,7 @@ public final class LocalWebServer: ObservableObject {
 
     private func cleanupConnection(_ connection: NWConnection) {
         connectionQueue.async {
-            self.activeConnections.remove(connection)
+            self.activeConnections.removeValue(forKey: ObjectIdentifier(connection))
         }
         connection.cancel()
     }
