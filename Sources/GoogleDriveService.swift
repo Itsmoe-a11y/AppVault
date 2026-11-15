@@ -1,6 +1,7 @@
 import Foundation
 import UIKit
 import AuthenticationServices
+import CommonCrypto
 
 // MARK: - Google Drive File Model
 public struct GoogleDriveFile: Identifiable, Codable, Hashable {
@@ -472,6 +473,3 @@ public final class GoogleDriveService: NSObject, ObservableObject, ASWebAuthenti
             .replacingOccurrences(of: "=", with: "")
     }
 }
-
-// CommonCrypto bridging declaration
-import CommonCrypto

@@ -9,6 +9,14 @@ public final class StreamingArchiveEngine {
 
     private init() {}
 
+    // MARK: - Stream Item Definition
+    struct StreamItem {
+        let diskURL: URL
+        let archiveRelativePath: String
+        let isDirectory: Bool
+        let size: Int64
+    }
+
     // MARK: - Tar Header Structure (512 bytes POSIX UStar)
     private struct TarHeader {
         var name: String        // 100 bytes
@@ -89,7 +97,6 @@ public final class StreamingArchiveEngine {
                 writeString(gname, offset: 297, maxLen: 32)
                 writeString(prefix, offset: 345, maxLen: 155)
 
-                // Calculate checksum (sum of all 512 bytes)
                 var sum: UInt32 = 0
                 for i in 0..<512 {
                     sum += UInt32(ptr[i])
@@ -116,7 +123,6 @@ public final class StreamingArchiveEngine {
             stream.zfree = nil
             stream.opaque = nil
 
-            // 15 + 16 enables automatic GZIP headers and trailer in zlib
             let ret = deflateInit2_(&stream, Z_DEFAULT_COMPRESSION, Z_DEFLATED, 15 + 16, 8, Z_DEFAULT_STRATEGY, ZLIB_VERSION, Int32(MemoryLayout<z_stream>.size))
             guard ret == Z_OK else {
                 throw NSError(domain: "AppVault.Streaming", code: Int(ret), userInfo: [NSLocalizedDescriptionKey: "Failed to initialize zlib deflate stream: \(ret)"])
@@ -126,13 +132,18 @@ public final class StreamingArchiveEngine {
 
         func write(data: Data) async throws {
             guard isOpen, !data.isEmpty else { return }
-            try await data.withUnsafeBytes { rawBuffer in
-                var inPtr = rawBuffer.bindMemory(to: UInt8.self).baseAddress!
-                stream.avail_in = uInt(data.count)
-                stream.next_in = UnsafeMutablePointer(mutating: inPtr)
+            var offset = 0
+            let inputCount = data.count
 
-                while stream.avail_in > 0 {
-                    try await outBuffer.withUnsafeMutableBytes { outRaw in
+            while offset < inputCount {
+                var producedChunk: Data? = nil
+
+                data.withUnsafeBytes { rawBuffer in
+                    let basePtr = rawBuffer.bindMemory(to: UInt8.self).baseAddress!
+                    stream.next_in = UnsafeMutablePointer(mutating: basePtr.advanced(by: offset))
+                    stream.avail_in = uInt(min(inputCount - offset, 65536))
+
+                    outBuffer.withUnsafeMutableBytes { outRaw in
                         let outPtr = outRaw.bindMemory(to: UInt8.self).baseAddress!
                         stream.avail_out = uInt(outBuffer.count)
                         stream.next_out = outPtr
@@ -141,10 +152,16 @@ public final class StreamingArchiveEngine {
 
                         let have = outBuffer.count - Int(stream.avail_out)
                         if have > 0 {
-                            let chunk = Data(bytes: outPtr, count: have)
-                            try await onChunk(chunk)
+                            producedChunk = Data(bytes: outPtr, count: have)
                         }
                     }
+
+                    let consumed = Int(inputCount - offset) - Int(stream.avail_in)
+                    offset += max(consumed, 1)
+                }
+
+                if let chunk = producedChunk {
+                    try await onChunk(chunk)
                 }
             }
         }
@@ -161,7 +178,9 @@ public final class StreamingArchiveEngine {
 
             var status = Z_OK
             while status != Z_STREAM_END {
-                try await outBuffer.withUnsafeMutableBytes { outRaw in
+                var producedChunk: Data? = nil
+
+                outBuffer.withUnsafeMutableBytes { outRaw in
                     let outPtr = outRaw.bindMemory(to: UInt8.self).baseAddress!
                     stream.avail_out = uInt(outBuffer.count)
                     stream.next_out = outPtr
@@ -170,9 +189,12 @@ public final class StreamingArchiveEngine {
 
                     let have = outBuffer.count - Int(stream.avail_out)
                     if have > 0 {
-                        let chunk = Data(bytes: outPtr, count: have)
-                        try await onChunk(chunk)
+                        producedChunk = Data(bytes: outPtr, count: have)
                     }
+                }
+
+                if let chunk = producedChunk {
+                    try await onChunk(chunk)
                 }
             }
         }
@@ -197,14 +219,6 @@ public final class StreamingArchiveEngine {
             fractionCompleted: 0.05,
             statusDetail: "Cataloging source files without staging..."
         ))
-
-        // 1. Build List of Items to Stream Directly
-        struct StreamItem {
-            let diskURL: URL
-            let archiveRelativePath: String
-            let isDirectory: Bool
-            let size: Int64
-        }
 
         var items: [StreamItem] = []
         var totalBytesToProcess: Int64 = 0
@@ -279,9 +293,8 @@ public final class StreamingArchiveEngine {
         // 4. Stream Source Files with Zero Memory/Staging Overhead
         var bytesProcessed: Int64 = 0
         let bufferSize = 65536 // 64 KB read buffer
-        var fileBuffer = [UInt8](repeating: 0, count: bufferSize)
 
-        for (index, item) in items.enumerated() {
+        for item in items {
             if item.isDirectory {
                 let dirHeader = TarHeader(path: item.archiveRelativePath + "/", size: 0, isDirectory: true)
                 try await gzip.write(data: dirHeader.toData())
@@ -304,7 +317,6 @@ public final class StreamingArchiveEngine {
                 fileBytesRead += Int64(chunkData.count)
                 bytesProcessed += Int64(chunkData.count)
 
-                // Periodic progress notification
                 if bytesProcessed % (512 * 1024) < Int64(bufferSize) || bytesProcessed == totalBytesToProcess {
                     let progressFraction = totalBytesToProcess > 0 ? min(0.95, Double(bytesProcessed) / Double(totalBytesToProcess)) : 0.5
                     onProgress(OperationProgress(
@@ -315,7 +327,6 @@ public final class StreamingArchiveEngine {
                 }
             }
 
-            // Pad file data to 512-byte boundary
             let pad = (512 - (Int(item.size) % 512)) % 512
             if pad > 0 {
                 try await gzip.write(data: Data(count: pad))
@@ -341,7 +352,7 @@ public final class StreamingArchiveEngine {
         rootURL: URL,
         baseArchivePath: String,
         includeCaches: Bool = true,
-        into items: inout [StreamingArchiveEngine.StreamItem],
+        into items: inout [StreamItem],
         totalBytes: inout Int64
     ) {
         var isDir: ObjCBool = false
@@ -354,7 +365,6 @@ public final class StreamingArchiveEngine {
             return
         }
 
-        // Add directory header
         items.append(StreamItem(diskURL: rootURL, archiveRelativePath: baseArchivePath, isDirectory: true, size: 0))
 
         guard let enumerator = fileManager.enumerator(at: rootURL, includingPropertiesForKeys: [.fileSizeKey, .isDirectoryKey], options: [.skipsPackageDescendants]) else {
@@ -365,7 +375,6 @@ public final class StreamingArchiveEngine {
             let subPath = url.path.replacingOccurrences(of: rootURL.path, with: "")
             let cleanSubPath = subPath.hasPrefix("/") ? String(subPath.dropFirst()) : subPath
 
-            // Skip caches and tmp if requested
             if !includeCaches {
                 if cleanSubPath.contains("Caches/") || cleanSubPath.contains("tmp/") || cleanSubPath.hasSuffix("/Caches") {
                     enumerator.skipDescendants()
