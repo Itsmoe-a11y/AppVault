@@ -63,9 +63,14 @@ public struct AppsListView: View {
                 } else {
                     List {
                         ForEach(appsVM.filteredApps) { app in
-                            AppRowView(app: app) {
-                                appsVM.backupTargetApp = app
-                            }
+                            AppRowView(
+                                app: app,
+                                isSelectionMode: appsVM.isSelectionMode,
+                                isSelected: appsVM.selectedAppIDs.contains(app.bundleIdentifier),
+                                onToggleSelect: { appsVM.toggleSelection(for: app) },
+                                onBackupTap: { appsVM.backupTargetApp = app },
+                                onExploreTap: { appsVM.exploreTargetApp = app }
+                            )
                         }
                     }
                     .listStyle(PlainListStyle())
@@ -73,18 +78,71 @@ public struct AppsListView: View {
                         appsVM.refreshApps()
                     }
                 }
+
+                // Bottom Floating Batch Action Bar
+                if appsVM.isSelectionMode && !appsVM.selectedAppIDs.isEmpty {
+                    VStack(spacing: 0) {
+                        Divider()
+                        HStack {
+                            Text("\(appsVM.selectedAppIDs.count) Selected")
+                                .font(.system(size: 14, weight: .bold))
+
+                            Spacer()
+
+                            Button(action: { appsVM.showBatchBackupSheet = true }) {
+                                HStack(spacing: 6) {
+                                    Image(systemName: "square.and.arrow.down.on.square.fill")
+                                    Text("Batch Backup")
+                                }
+                                .font(.system(size: 14, weight: .bold))
+                                .foregroundColor(.white)
+                                .padding(.horizontal, 16)
+                                .padding(.vertical, 8)
+                                .background(Color.blue)
+                                .cornerRadius(8)
+                            }
+                        }
+                        .padding(.horizontal)
+                        .padding(.vertical, 10)
+                        .background(Color(UIColor.secondarySystemBackground))
+                    }
+                }
             }
             .navigationTitle("Applications (\(appsVM.filteredApps.count))")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
+                ToolbarItem(placement: .navigationBarLeading) {
+                    Button(appsVM.isSelectionMode ? "Done" : "Select") {
+                        appsVM.isSelectionMode.toggle()
+                        if !appsVM.isSelectionMode {
+                            appsVM.clearSelection()
+                        }
+                    }
+                }
+
                 ToolbarItem(placement: .navigationBarTrailing) {
-                    Button(action: { appsVM.refreshApps() }) {
-                        Image(systemName: "arrow.clockwise")
+                    if appsVM.isSelectionMode {
+                        Button("Select All") {
+                            appsVM.selectAll()
+                        }
+                    } else {
+                        Button(action: { appsVM.refreshApps() }) {
+                            Image(systemName: "arrow.clockwise")
+                        }
                     }
                 }
             }
             .sheet(item: $appsVM.backupTargetApp) { target in
                 BackupDetailSheet(app: target)
+                    .environmentObject(backupsVM)
+            }
+            .sheet(item: $appsVM.exploreTargetApp) { target in
+                NavigationView {
+                    DataExplorerView(app: target)
+                }
+            }
+            .sheet(isPresented: $appsVM.showBatchBackupSheet) {
+                BatchBackupSheet(apps: appsVM.selectedApps)
                     .environmentObject(backupsVM)
             }
         }
@@ -95,14 +153,27 @@ public struct AppsListView: View {
 // MARK: - App Row Component
 struct AppRowView: View {
     let app: InstalledApp
+    let isSelectionMode: Bool
+    let isSelected: Bool
+    let onToggleSelect: () -> Void
     let onBackupTap: () -> Void
+    let onExploreTap: () -> Void
 
     var body: some View {
-        HStack(spacing: 14) {
+        HStack(spacing: 12) {
+            if isSelectionMode {
+                Button(action: onToggleSelect) {
+                    Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
+                        .foregroundColor(isSelected ? .blue : .secondary)
+                        .font(.system(size: 22))
+                }
+                .buttonStyle(BorderlessButtonStyle())
+            }
+
             Image(systemName: app.isSystemApp ? "gearshape.fill" : "app.fill")
-                .font(.system(size: 28))
+                .font(.system(size: 26))
                 .foregroundColor(app.isSystemApp ? .gray : .blue)
-                .frame(width: 44, height: 44)
+                .frame(width: 40, height: 40)
                 .background(Color(UIColor.tertiarySystemFill))
                 .cornerRadius(10)
 
@@ -141,17 +212,37 @@ struct AppRowView: View {
 
             Spacer()
 
-            Button(action: onBackupTap) {
-                Text("Backup")
-                    .font(.system(size: 14, weight: .bold))
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 6)
-                    .background(Color.blue)
-                    .foregroundColor(.white)
-                    .cornerRadius(16)
+            if !isSelectionMode {
+                HStack(spacing: 8) {
+                    Button(action: onExploreTap) {
+                        Image(systemName: "folder.badge.gearshape")
+                            .font(.system(size: 14))
+                            .foregroundColor(.secondary)
+                            .padding(6)
+                            .background(Color(UIColor.secondarySystemBackground))
+                            .cornerRadius(8)
+                    }
+                    .buttonStyle(BorderlessButtonStyle())
+
+                    Button(action: onBackupTap) {
+                        Text("Backup")
+                            .font(.system(size: 13, weight: .bold))
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 6)
+                            .background(Color.blue)
+                            .foregroundColor(.white)
+                            .cornerRadius(14)
+                    }
+                    .buttonStyle(BorderlessButtonStyle())
+                }
             }
-            .buttonStyle(BorderlessButtonStyle())
         }
         .padding(.vertical, 4)
+        .contentShape(Rectangle())
+        .onTapGesture {
+            if isSelectionMode {
+                onToggleSelect()
+            }
+        }
     }
 }

@@ -10,6 +10,8 @@ public struct BackupDetailSheet: View {
     @State private var selectedDestination: BackupDestination = .local
     @State private var includeCaches: Bool = false
     @State private var note: String = ""
+    @State private var enableEncryption: Bool = false
+    @State private var encryptionPassword: String = ""
 
     public init(app: InstalledApp) {
         self.app = app
@@ -82,6 +84,22 @@ public struct BackupDetailSheet: View {
                         }
                     }
 
+                    if selectedDestination == .webdav {
+                        if WebDAVService.shared.isConfigured {
+                            HStack {
+                                Image(systemName: "checkmark.circle.fill")
+                                    .foregroundColor(.green)
+                                Text("Connected to \(WebDAVService.shared.serverURL)")
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                            }
+                        } else {
+                            Text("WebDAV server is not configured. Please enter your credentials in Settings.")
+                                .font(.caption)
+                                .foregroundColor(.orange)
+                        }
+                    }
+
                     if selectedDestination == .googleDrive {
                         if googleDrive.isAuthenticated {
                             HStack {
@@ -139,6 +157,11 @@ public struct BackupDetailSheet: View {
                 Section(header: Text("Options")) {
                     Toggle("Include Caches & Temp Files", isOn: $includeCaches)
                     TextField("Note / Label (e.g. Work Profile, Save 1)", text: $note)
+
+                    Toggle("Encrypt with AES-256-GCM", isOn: $enableEncryption)
+                    if enableEncryption {
+                        SecureField("Set Backup Password", text: $encryptionPassword)
+                    }
                 }
 
                 // Section 6: Action or Active Progress

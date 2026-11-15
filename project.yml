@@ -20,6 +20,9 @@ targets:
     deploymentTarget: "15.0"
     sources:
       - path: Sources
+    dependencies:
+      - sdk: libsqlite3.tbd
+      - sdk: libz.tbd
     settings:
       base:
         INFOPLIST_FILE: Resources/Info.plist

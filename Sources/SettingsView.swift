@@ -3,6 +3,8 @@ import SwiftUI
 public struct SettingsView: View {
     @EnvironmentObject var settingsVM: SettingsViewModel
     @ObservedObject var googleDrive = GoogleDriveService.shared
+    @ObservedObject var webServer = LocalWebServer.shared
+    @ObservedObject var webdav = WebDAVService.shared
     @State private var showAdvancedOAuth = false
 
     public init() {}
@@ -10,7 +12,34 @@ public struct SettingsView: View {
     public var body: some View {
         NavigationView {
             Form {
-                // Section 1: Google Drive Cloud Integration
+                // Section 1: Local Wi-Fi Transfer Server
+                Section(header: Text("Local Wi-Fi Browser Transfer")) {
+                    Toggle(isOn: Binding(
+                        get: { webServer.isRunning },
+                        set: { val in
+                            if val { webServer.start() } else { webServer.stop() }
+                        }
+                    )) {
+                        Label("Wi-Fi Web Dashboard", systemImage: "wifi")
+                    }
+
+                    if webServer.isRunning {
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text("Open in any PC or phone browser on this Wi-Fi:")
+                                .font(.caption2)
+                                .foregroundColor(.secondary)
+                            Text(webServer.serverURLString)
+                                .font(.system(size: 15, weight: .bold, design: .monospaced))
+                                .foregroundColor(.blue)
+                            Text("Download and upload backups directly over local network with zero cloud quota.")
+                                .font(.caption2)
+                                .foregroundColor(.secondary)
+                        }
+                        .padding(.vertical, 4)
+                    }
+                }
+
+                // Section 2: Google Drive Cloud Integration
                 Section(header: Text("Google Drive Cloud Storage")) {
                     if googleDrive.isAuthenticated {
                         HStack(spacing: 12) {
@@ -78,6 +107,26 @@ public struct SettingsView: View {
                                 .disableAutocorrection(true)
                         }
                         .padding(.vertical, 4)
+                    }
+                }
+
+                // Section 3: WebDAV / Nextcloud / Synology NAS
+                Section(header: Text("WebDAV / Nextcloud / NAS")) {
+                    TextField("Server URL (https://...)", text: $webdav.serverURL)
+                        .autocapitalization(.none)
+                        .disableAutocorrection(true)
+                        .font(.system(size: 12, design: .monospaced))
+
+                    TextField("Username", text: $webdav.username)
+                        .autocapitalization(.none)
+                        .disableAutocorrection(true)
+
+                    SecureField("Password", text: $webdav.password)
+
+                    Button("Test & Save Connection") {
+                        Task {
+                            _ = try? await webdav.testConnection()
+                        }
                     }
                 }
 
@@ -156,7 +205,7 @@ public struct SettingsView: View {
                     HStack {
                         Text("App Version")
                         Spacer()
-                        Text("1.1.0 (Zero-Staging & Google Drive)")
+                        Text("2.0.0 (Ultimate Edition)")
                             .foregroundColor(.secondary)
                     }
 

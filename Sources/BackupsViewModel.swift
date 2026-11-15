@@ -5,6 +5,7 @@ import Combine
 public enum BackupDestination: String, CaseIterable, Identifiable {
     case local = "local"
     case googleDrive = "google_drive"
+    case webdav = "webdav"
 
     public var id: String { rawValue }
 
@@ -12,6 +13,7 @@ public enum BackupDestination: String, CaseIterable, Identifiable {
         switch self {
         case .local: return "Device Storage"
         case .googleDrive: return "Google Drive (Zero Local Space)"
+        case .webdav: return "WebDAV / Nextcloud / NAS"
         }
     }
 
@@ -19,6 +21,7 @@ public enum BackupDestination: String, CaseIterable, Identifiable {
         switch self {
         case .local: return "iphone"
         case .googleDrive: return "icloud.and.arrow.up.fill"
+        case .webdav: return "server.rack"
         }
     }
 }
@@ -190,6 +193,36 @@ public final class BackupsViewModel: ObservableObject {
                         self.alertMessage = "Successfully backed up \(newRecord.appName) directly to Google Drive without consuming local device storage!"
                         self.showAlert = true
                     }
+                } else if destination == .webdav {
+                    let safeName = app.name.components(separatedBy: CharacterSet.alphanumerics.inverted).joined()
+                    let timestamp = Int(Date().timeIntervalSince1970)
+                    let archiveName = "\(safeName)_\(app.bundleIdentifier)_\(timestamp).adbk"
+
+                    var uploadData = Data()
+                    let newRecord = try await StreamingArchiveEngine.shared.streamBackup(
+                        for: app,
+                        mode: mode,
+                        includeCaches: includeCaches,
+                        note: note,
+                        onProgress: { p in
+                            Task { @MainActor in
+                                self.activeProgress = p
+                            }
+                        },
+                        onCompressedChunk: { chunk in
+                            uploadData.append(chunk)
+                        }
+                    )
+
+                    try await WebDAVService.shared.upload(data: uploadData, remoteFileName: archiveName)
+
+                    await MainActor.run {
+                        self.isPerformingOperation = false
+                        self.activeProgress = nil
+                        self.alertTitle = "WebDAV Upload Complete"
+                        self.alertMessage = "Successfully streamed \(newRecord.appName) to your WebDAV server!"
+                        self.showAlert = true
+                    }
                 } else {
                     let newRecord = try await BackupEngine.shared.createStreamingBackup(
                         for: app,
@@ -221,7 +254,7 @@ public final class BackupsViewModel: ObservableObject {
     }
 
     // MARK: - Restore from Local Backup
-    public func startRestore(record: BackupRecord) {
+    public func startRestore(record: BackupRecord, options: SelectiveRestoreOptions = SelectiveRestoreOptions()) {
         isPerformingOperation = true
         activeProgress = OperationProgress(stage: "Initializing", fractionCompleted: 0.0, statusDetail: "Preparing restoration...")
 
@@ -229,7 +262,7 @@ public final class BackupsViewModel: ObservableObject {
 
         Task.detached(priority: .userInitiated) {
             do {
-                _ = try await RestoreEngine.shared.restore(from: archiveURL) { progress in
+                _ = try await RestoreEngine.shared.restore(from: archiveURL, options: options) { progress in
                     Task { @MainActor in
                         self.activeProgress = progress
                     }
@@ -255,7 +288,7 @@ public final class BackupsViewModel: ObservableObject {
     }
 
     // MARK: - Restore Direct from Google Drive
-    public func startCloudRestore(file: GoogleDriveFile) {
+    public func startCloudRestore(file: GoogleDriveFile, options: SelectiveRestoreOptions = SelectiveRestoreOptions()) {
         isPerformingOperation = true
         activeProgress = OperationProgress(stage: "Downloading", fractionCompleted: 0.1, statusDetail: "Downloading \(file.name) from Google Drive...")
 
@@ -273,7 +306,7 @@ public final class BackupsViewModel: ObservableObject {
                     }
                 }
 
-                _ = try await RestoreEngine.shared.restore(from: tempArchive) { progress in
+                _ = try await RestoreEngine.shared.restore(from: tempArchive, options: options) { progress in
                     Task { @MainActor in
                         var scaled = progress
                         scaled.fractionCompleted = 0.5 + progress.fractionCompleted * 0.5

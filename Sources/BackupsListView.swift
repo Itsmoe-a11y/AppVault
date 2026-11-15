@@ -101,17 +101,10 @@ public struct BackupsListView: View {
                     dismissButton: .default(Text("OK"))
                 )
             }
-            .actionSheet(item: $backupsVM.restoreConfirmationRecord) { record in
-                ActionSheet(
-                    title: Text("Restore \(record.appName)?"),
-                    message: Text("Restoring will replace the application's current documents and databases with this backup (\(record.formattedDate)). Any running instance will be terminated."),
-                    buttons: [
-                        .destructive(Text("Restore State")) {
-                            backupsVM.startRestore(record: record)
-                        },
-                        .cancel()
-                    ]
-                )
+            .sheet(item: $backupsVM.restoreConfirmationRecord) { record in
+                SelectiveRestoreSheet(record: record) { options in
+                    backupsVM.startRestore(record: record, options: options)
+                }
             }
             .actionSheet(item: $backupsVM.restoreConfirmationCloudFile) { file in
                 ActionSheet(

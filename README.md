@@ -8,9 +8,15 @@ AppVault is a modern, unsandboxed SwiftUI application for iOS (iOS 14.0+) design
 
 ## Highlights
 
+- **Keychain Item Extraction & Restoration**: Captures app-specific Keychain credentials (`kSecClassGenericPassword`, `kSecClassInternetPassword`) and restores them so users never get logged out of restored accounts.
+- **Local Wi-Fi Browser Transfer Server**: Embedded HTTP server (`http://<device-ip>:8080`) providing a web dashboard to upload and download backups directly from any PC or phone browser on your local network.
+- **AES-256-GCM Password Encryption**: Encrypts backups with authenticated AES-GCM using keys derived via PBKDF2 SHA-256 (100k rounds).
+- **Multi-Cloud Backends**: Direct streaming support for **Google Drive**, **WebDAV**, **Nextcloud**, and local NAS.
+- **In-App Data Explorer (Plist & SQLite)**: Inspect app data containers on-device. Edit `.plist` preferences directly and query SQLite databases (`SELECT *`, view tables and rows).
+- **Batch Multi-Select Backup**: Queue backups for multiple apps in one automated sequence.
+- **Selective Restore**: Granular checkboxes to choose exactly what to restore (Documents, Preferences, Databases, App Groups, or Keychain).
 - **Zero-Staging Streaming Compression**: Streams POSIX UStar tar headers and file bytes directly into `zlib` deflate and emits compressed chunks on-the-fly. Eliminates intermediate file duplication and saves up to 50% temporary disk space during backup!
 - **Direct Google Drive Streaming (0 MB Device Storage)**: Stream backup archives directly to Google Drive via chunked Resumable Upload sessions (`PUT bytes START-END/TOTAL`). No local archive is created or saved to disk—perfect for devices that are almost full.
-- **Cloud Backup Manager**: Connect via OAuth 2.0 PKCE to view, download, restore, or delete backups stored in the `AppVault Backups` folder on Google Drive.
 - **Complete Data Preservation**: Unlike standard iOS backups, AppVault backs up the app's internal keychain references, user defaults, SQLite/Realm databases, offline caches, and document stores.
 - **Shared App Groups Support**: Automatically discovers and backs up `/var/mobile/Containers/Shared/AppGroup/<UUID>/` associated with applications (crucial for WhatsApp, Telegram, Discord, and widget-enabled apps).
 - **Two Backup Modes**:

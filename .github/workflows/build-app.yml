@@ -14,10 +14,10 @@ on:
         type: boolean
         default: true
       release_tag:
-        description: 'Release Tag (defaults to v1.1.0)'
+        description: 'Release Tag (defaults to v2.0.0)'
         required: false
         type: string
-        default: 'v1.1.0'
+        default: 'v2.0.0'
 
 permissions:
   contents: write
@@ -86,18 +86,21 @@ jobs:
         if: ${{ github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && github.event.inputs.upload_release == 'true') }}
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ github.event.inputs.release_tag || 'v1.1.0' }}
-          name: "AppVault ${{ github.event.inputs.release_tag || 'v1.1.0' }}"
+          tag_name: ${{ github.event.inputs.release_tag || 'v2.0.0' }}
+          name: "AppVault ${{ github.event.inputs.release_tag || 'v2.0.0' }}"
           body: |
-            ## AppVault v1.1.0 - Zero-Staging Streaming & Google Drive Integration
+            ## AppVault v2.0.0 - Ultimate iOS App & Data Management Suite
             
-            AppVault is an unsandboxed application for **TrollStore** and **jailbroken** iOS devices (iOS 15.0 - 17.0+) designed to create complete, 100% faithful backups of installed iOS apps and their internal data containers.
+            AppVault is an unsandboxed application for **TrollStore** and **jailbroken** iOS devices (iOS 15.0 - 17.0+).
 
-            ### New in v1.1.0:
-            - **Zero-Staging Streaming Compression**: Backs up apps by streaming source files directly into `zlib` deflate and writing the output archive on-the-fly. Eliminates intermediate file duplication and saves up to 50% temporary storage on device!
-            - **Direct Google Drive Streaming (0 MB Local Storage)**: Stream compressed archives directly into Google Drive via chunked Resumable Upload sessions (`PUT bytes START-END/TOTAL`). No local archive is saved, allowing full backups on devices with zero remaining free space!
-            - **Cloud Backup Manager**: Browse, download, and restore backups directly from Google Drive back to the device.
-            - **OAuth 2.0 PKCE**: Native Google Sign-In with customizable Client ID & Secret in Settings.
+            ### Highlights in v2.0.0:
+            1. 🔑 **Keychain Item Backup & Restore**: Extracts app-specific Keychain credentials (`kSecClassGenericPassword`, `kSecClassInternetPassword`) so you never get logged out of restored accounts.
+            2. 🌐 **Local Wi-Fi Browser Transfer Server**: Embedded HTTP server (`http://<device-ip>:8080`) providing a web dashboard to upload and download backups directly from any PC/Mac browser on your Wi-Fi network.
+            3. 🔒 **AES-256-GCM Encryption**: Password-protect backup archives with PBKDF2 SHA-256 key derivation.
+            4. ☁️ **Expanded Cloud Backends**: Direct streaming support for **Google Drive**, **WebDAV**, **Nextcloud**, and local NAS.
+            5. 🔍 **In-App Data Explorer (Plist & SQLite)**: Inspect app data containers on-device. Edit `.plist` preferences directly and query SQLite databases (`SELECT *`, view tables and rows).
+            6. 📦 **Batch Multi-Select Backup**: Queue backups for multiple apps in one automated sequence.
+            7. 🎯 **Selective Restore**: Granular checkboxes to choose exactly what to restore (Documents, Preferences, Databases, App Groups, or Keychain).
 
             ### Installation:
             - **TrollStore**: Download `AppVault.tipa` (or `AppVault.ipa`) and open in TrollStore.

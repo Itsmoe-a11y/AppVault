@@ -9,6 +9,12 @@ public final class AppsViewModel: ObservableObject {
     @Published public var showSystemApps: Bool = false
     @Published public var isScanning: Bool = false
     @Published public var backupTargetApp: InstalledApp? = nil
+    @Published public var exploreTargetApp: InstalledApp? = nil
+
+    // Batch Multi-Selection Mode
+    @Published public var isSelectionMode: Bool = false
+    @Published public var selectedAppIDs: Set<String> = []
+    @Published public var showBatchBackupSheet: Bool = false
 
     private var cancellables = Set<AnyCancellable>()
 
@@ -31,6 +37,26 @@ public final class AppsViewModel: ObservableObject {
         }
     }
 
+    public var selectedApps: [InstalledApp] {
+        apps.filter { selectedAppIDs.contains($0.bundleIdentifier) }
+    }
+
+    public func toggleSelection(for app: InstalledApp) {
+        if selectedAppIDs.contains(app.bundleIdentifier) {
+            selectedAppIDs.remove(app.bundleIdentifier)
+        } else {
+            selectedAppIDs.insert(app.bundleIdentifier)
+        }
+    }
+
+    public func selectAll() {
+        selectedAppIDs = Set(filteredApps.map { $0.bundleIdentifier })
+    }
+
+    public func clearSelection() {
+        selectedAppIDs.removeAll()
+    }
+
     public func refreshApps() {
         isScanning = true
         Task.detached(priority: .userInitiated) {
@@ -40,7 +66,6 @@ public final class AppsViewModel: ObservableObject {
                 self.isScanning = false
             }
 
-            // Asynchronously calculate sizes in background
             for app in discovered {
                 let sizes = AppDiscoveryService.shared.calculateAppSizes(for: app)
                 await MainActor.run {

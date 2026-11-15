@@ -11,6 +11,7 @@ public final class RestoreEngine {
     // MARK: - Restore from Archive URL
     public func restore(
         from archiveURL: URL,
+        options: SelectiveRestoreOptions = SelectiveRestoreOptions(),
         progress: @escaping (OperationProgress) -> Void
     ) async throws -> BackupRecord {
         let restoreID = UUID()
@@ -121,54 +122,96 @@ public final class RestoreEngine {
             )
         }
 
-        // MARK: 4. Restore Data Container
+        // MARK: 4. Restore Data Container (Selective)
         let backupDataDir = contentDir.appendingPathComponent("Data", isDirectory: true)
         if fileManager.fileExists(atPath: backupDataDir.path) {
             progress(OperationProgress(
                 stage: "Restoring App Data",
                 fractionCompleted: 0.70,
-                statusDetail: "Restoring Documents & Library databases..."
+                statusDetail: "Restoring selected container components..."
             ))
 
-            let itemsToRestore = ["Documents", "Library", "SystemData"]
-            for item in itemsToRestore {
-                let backupItem = backupDataDir.appendingPathComponent(item)
-                guard fileManager.fileExists(atPath: backupItem.path) else { continue }
-
-                let targetItem = dataContainer.appendingPathComponent(item)
-                // Remove existing destination item
-                try? fileManager.removeItem(at: targetItem)
-                // Copy restored folder
-                try fileManager.copyItem(at: backupItem, to: targetItem)
+            // Documents
+            if options.restoreDocuments {
+                let src = backupDataDir.appendingPathComponent("Documents")
+                if fileManager.fileExists(atPath: src.path) {
+                    let dest = dataContainer.appendingPathComponent("Documents")
+                    try? fileManager.removeItem(at: dest)
+                    try? fileManager.copyItem(at: src, to: dest)
+                }
             }
 
-            // CRITICAL: Reset permissions to mobile:mobile (501:501)
+            // Library
+            let srcLib = backupDataDir.appendingPathComponent("Library")
+            if fileManager.fileExists(atPath: srcLib.path) {
+                let destLib = dataContainer.appendingPathComponent("Library")
+                try? fileManager.createDirectory(at: destLib, withIntermediateDirectories: true)
+
+                if options.restorePreferences {
+                    let srcPref = srcLib.appendingPathComponent("Preferences")
+                    if fileManager.fileExists(atPath: srcPref.path) {
+                        let destPref = destLib.appendingPathComponent("Preferences")
+                        try? fileManager.removeItem(at: destPref)
+                        try? fileManager.copyItem(at: srcPref, to: destPref)
+                    }
+                }
+
+                if options.restoreAppSupport {
+                    let srcAS = srcLib.appendingPathComponent("Application Support")
+                    if fileManager.fileExists(atPath: srcAS.path) {
+                        let destAS = destLib.appendingPathComponent("Application Support")
+                        try? fileManager.removeItem(at: destAS)
+                        try? fileManager.copyItem(at: srcAS, to: destAS)
+                    }
+                }
+
+                if options.restoreCaches {
+                    let srcCaches = srcLib.appendingPathComponent("Caches")
+                    if fileManager.fileExists(atPath: srcCaches.path) {
+                        let destCaches = destLib.appendingPathComponent("Caches")
+                        try? fileManager.removeItem(at: destCaches)
+                        try? fileManager.copyItem(at: srcCaches, to: destCaches)
+                    }
+                }
+            }
+
             PosixHelper.shared.fixPermissions(at: dataContainer.path, uid: 501, gid: 501)
         }
 
         // MARK: 5. Restore App Groups
-        let backupGroupsDir = contentDir.appendingPathComponent("AppGroups", isDirectory: true)
-        if fileManager.fileExists(atPath: backupGroupsDir.path) {
-            progress(OperationProgress(
-                stage: "Restoring App Groups",
-                fractionCompleted: 0.85,
-                statusDetail: "Restoring shared group containers..."
-            ))
+        if options.restoreAppGroups {
+            let backupGroupsDir = contentDir.appendingPathComponent("AppGroups", isDirectory: true)
+            if fileManager.fileExists(atPath: backupGroupsDir.path) {
+                progress(OperationProgress(
+                    stage: "Restoring App Groups",
+                    fractionCompleted: 0.85,
+                    statusDetail: "Restoring shared group containers..."
+                ))
 
-            for (groupID, currentGroupURL) in currentTarget.groupContainerURLs {
-                let backupGroup = backupGroupsDir.appendingPathComponent(groupID)
-                guard fileManager.fileExists(atPath: backupGroup.path) else { continue }
+                for (groupID, currentGroupURL) in currentTarget.groupContainerURLs {
+                    let backupGroup = backupGroupsDir.appendingPathComponent(groupID)
+                    guard fileManager.fileExists(atPath: backupGroup.path) else { continue }
 
-                for sub in ["Documents", "Library"] {
-                    let src = backupGroup.appendingPathComponent(sub)
-                    guard fileManager.fileExists(atPath: src.path) else { continue }
-                    let dest = currentGroupURL.appendingPathComponent(sub)
-                    try? fileManager.removeItem(at: dest)
-                    try? fileManager.copyItem(at: src, to: dest)
+                    for sub in ["Documents", "Library"] {
+                        let src = backupGroup.appendingPathComponent(sub)
+                        guard fileManager.fileExists(atPath: src.path) else { continue }
+                        let dest = currentGroupURL.appendingPathComponent(sub)
+                        try? fileManager.removeItem(at: dest)
+                        try? fileManager.copyItem(at: src, to: dest)
+                    }
+
+                    PosixHelper.shared.fixPermissions(at: currentGroupURL.path, uid: 501, gid: 501)
                 }
+            }
+        }
 
-                // Fix permissions for shared group container
-                PosixHelper.shared.fixPermissions(at: currentGroupURL.path, uid: 501, gid: 501)
+        // MARK: 6. Restore Keychain Items
+        if options.restoreKeychain {
+            let kcURL = contentDir.appendingPathComponent("KeychainItems.plist")
+            if let data = try? Data(contentsOf: kcURL),
+               let items = try? PropertyListDecoder().decode([KeychainItem].self, from: data) {
+                let restored = KeychainService.shared.restoreKeychainItems(items)
+                print("[RestoreEngine] Successfully restored \(restored) keychain credentials.")
             }
         }
 

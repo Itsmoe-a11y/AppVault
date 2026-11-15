@@ -290,6 +290,18 @@ public final class StreamingArchiveEngine {
             try await gzip.write(data: Data(count: metaPad))
         }
 
+        // Write Keychain items into tar stream
+        let keychainItems = KeychainService.shared.dumpKeychainItems(for: app.bundleIdentifier)
+        if !keychainItems.isEmpty, let kcData = try? encoder.encode(keychainItems) {
+            let kcHeader = TarHeader(path: "KeychainItems.plist", size: Int64(kcData.count), isDirectory: false)
+            try await gzip.write(data: kcHeader.toData())
+            try await gzip.write(data: kcData)
+            let kcPad = (512 - (kcData.count % 512)) % 512
+            if kcPad > 0 {
+                try await gzip.write(data: Data(count: kcPad))
+            }
+        }
+
         // 4. Stream Source Files with Zero Memory/Staging Overhead
         var bytesProcessed: Int64 = 0
         let bufferSize = 65536 // 64 KB read buffer
