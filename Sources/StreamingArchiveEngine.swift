@@ -36,10 +36,14 @@ struct TarHeader {
             cleanPath += "/"
         }
 
+        var resolvedName = ""
+        var resolvedPrefix = ""
+        var longNameRequired = false
+
         let pathBytesCount = cleanPath.utf8.count
         if pathBytesCount <= 100 {
-            self.name = cleanPath
-            self.prefix = ""
+            resolvedName = cleanPath
+            resolvedPrefix = ""
         } else {
             // Attempt UStar split: prefix (<= 155 bytes) / name (<= 100 bytes)
             var splitFound = false
@@ -52,8 +56,8 @@ struct TarHeader {
                     let nameCandidate = String(chars[(i + 1)...])
 
                     if prefixCandidate.utf8.count <= 155 && nameCandidate.utf8.count <= 100 && !nameCandidate.isEmpty {
-                        self.prefix = prefixCandidate
-                        self.name = nameCandidate
+                        resolvedPrefix = prefixCandidate
+                        resolvedName = nameCandidate
                         splitFound = true
                         break
                     }
@@ -62,14 +66,18 @@ struct TarHeader {
 
             if !splitFound {
                 // Path exceeds UStar 155/100 limits: GNU long name header required
-                self.needsLongName = true
+                longNameRequired = true
                 let parts = cleanPath.components(separatedBy: "/")
                 let lastPart = parts.last ?? cleanPath
-                self.name = String(decoding: lastPart.utf8.prefix(100), as: UTF8.self)
+                resolvedName = String(decoding: lastPart.utf8.prefix(100), as: UTF8.self)
                 let prefixPart = parts.dropLast().joined(separator: "/")
-                self.prefix = String(decoding: prefixPart.utf8.prefix(155), as: UTF8.self)
+                resolvedPrefix = String(decoding: prefixPart.utf8.prefix(155), as: UTF8.self)
             }
         }
+
+        self.name = resolvedName
+        self.prefix = resolvedPrefix
+        self.needsLongName = longNameRequired
     }
 
     static func makeLongNameHeader(path: String) -> TarHeader {
