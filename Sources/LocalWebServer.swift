@@ -2,7 +2,6 @@ import Foundation
 import Network
 import UIKit
 
-@MainActor
 public final class LocalWebServer: ObservableObject {
     public static let shared = LocalWebServer()
 
@@ -13,9 +12,7 @@ public final class LocalWebServer: ObservableObject {
     private var listener: NWListener?
     private let port: NWEndpoint.Port = 8080
 
-    private override init() {
-        super.init()
-    }
+    private init() {}
 
     // MARK: - Start Server
     public func start() {
@@ -27,7 +24,7 @@ public final class LocalWebServer: ObservableObject {
             listener = try NWListener(using: params, on: port)
 
             listener?.stateUpdateHandler = { [weak self] state in
-                Task { @MainActor in
+                DispatchQueue.main.async {
                     guard let self = self else { return }
                     switch state {
                     case .ready:
@@ -53,7 +50,9 @@ public final class LocalWebServer: ObservableObject {
 
             listener?.start(queue: .global(qos: .userInitiated))
         } catch {
-            connectionStatus = "Error: \(error.localizedDescription)"
+            DispatchQueue.main.async {
+                self.connectionStatus = "Error: \(error.localizedDescription)"
+            }
         }
     }
 
@@ -61,9 +60,11 @@ public final class LocalWebServer: ObservableObject {
     public func stop() {
         listener?.cancel()
         listener = nil
-        isRunning = false
-        serverURLString = ""
-        connectionStatus = "Stopped"
+        DispatchQueue.main.async {
+            self.isRunning = false
+            self.serverURLString = ""
+            self.connectionStatus = "Stopped"
+        }
     }
 
     // MARK: - Connection Handler
