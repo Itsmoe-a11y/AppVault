@@ -130,7 +130,7 @@ public final class AppDiscoveryService {
                 if let data = try? Data(contentsOf: metaPlist),
                    let dict = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any],
                    let identifier = dict["MCMMetadataIdentifier"] as? String {
-                    if var existing = results[identifier] {
+                    if let existing = results[identifier] {
                         results[identifier] = InstalledApp(
                             bundleIdentifier: existing.bundleIdentifier,
                             name: existing.name,

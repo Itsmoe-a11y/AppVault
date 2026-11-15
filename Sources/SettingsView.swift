@@ -15,7 +15,7 @@ public struct SettingsView: View {
                         Spacer()
                         Text(settingsVM.canAccessRootMobile ? "Unsandboxed (Root/Mobile)" : "Sandboxed")
                             .foregroundColor(settingsVM.canAccessRootMobile ? .green : .orange)
-                            .fontWeight(.bold)
+                            .font(.system(size: 14, weight: .bold))
                     }
 
                     HStack {
@@ -47,7 +47,7 @@ public struct SettingsView: View {
                         Spacer()
                         Text(settingsVM.backupStorageUsed)
                             .foregroundColor(.blue)
-                            .fontWeight(.bold)
+                            .font(.system(size: 14, weight: .bold))
                     }
 
                     HStack {

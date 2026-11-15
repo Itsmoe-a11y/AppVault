@@ -24,7 +24,8 @@ public final class BackupsViewModel: ObservableObject {
         isLoading = true
         Task.detached(priority: .userInitiated) {
             let backupDir = BackupEngine.shared.backupsDirectory
-            guard let files = try? self.fileManager.contentsOfDirectory(at: backupDir, includingPropertiesForKeys: [.contentModificationDateKey, .fileSizeKey], options: [.skipsHiddenFiles]) else {
+            let fm = FileManager.default
+            guard let files = try? fm.contentsOfDirectory(at: backupDir, includingPropertiesForKeys: [.contentModificationDateKey, .fileSizeKey], options: [.skipsHiddenFiles]) else {
                 await MainActor.run {
                     self.backups = []
                     self.isLoading = false
