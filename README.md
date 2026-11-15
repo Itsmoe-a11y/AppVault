@@ -8,6 +8,9 @@ AppVault is a modern, unsandboxed SwiftUI application for iOS (iOS 14.0+) design
 
 ## Highlights
 
+- **Zero-Staging Streaming Compression**: Streams POSIX UStar tar headers and file bytes directly into `zlib` deflate and emits compressed chunks on-the-fly. Eliminates intermediate file duplication and saves up to 50% temporary disk space during backup!
+- **Direct Google Drive Streaming (0 MB Device Storage)**: Stream backup archives directly to Google Drive via chunked Resumable Upload sessions (`PUT bytes START-END/TOTAL`). No local archive is created or saved to disk—perfect for devices that are almost full.
+- **Cloud Backup Manager**: Connect via OAuth 2.0 PKCE to view, download, restore, or delete backups stored in the `AppVault Backups` folder on Google Drive.
 - **Complete Data Preservation**: Unlike standard iOS backups, AppVault backs up the app's internal keychain references, user defaults, SQLite/Realm databases, offline caches, and document stores.
 - **Shared App Groups Support**: Automatically discovers and backs up `/var/mobile/Containers/Shared/AppGroup/<UUID>/` associated with applications (crucial for WhatsApp, Telegram, Discord, and widget-enabled apps).
 - **Two Backup Modes**:

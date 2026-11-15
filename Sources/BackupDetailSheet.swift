@@ -4,8 +4,10 @@ public struct BackupDetailSheet: View {
     public let app: InstalledApp
     @Environment(\.presentationMode) var presentationMode
     @EnvironmentObject var backupsVM: BackupsViewModel
+    @ObservedObject var googleDrive = GoogleDriveService.shared
 
     @State private var selectedMode: BackupMode = .dataOnly
+    @State private var selectedDestination: BackupDestination = .local
     @State private var includeCaches: Bool = false
     @State private var note: String = ""
 
@@ -37,7 +39,7 @@ public struct BackupDetailSheet: View {
                     .padding(.vertical, 4)
                 }
 
-                // Section 2: Storage Estimates
+                // Section 2: Storage Estimates & Zero-Footprint Streaming Badge
                 Section(header: Text("Storage Footprint")) {
                     HStack {
                         Label("App Binary", systemImage: "shippingbox")
@@ -61,9 +63,62 @@ public struct BackupDetailSheet: View {
                                 .foregroundColor(.secondary)
                         }
                     }
+
+                    HStack(spacing: 8) {
+                        Image(systemName: "bolt.horizontal.circle.fill")
+                            .foregroundColor(.green)
+                        Text("Zero-staging streaming enabled: source files are compressed on-the-fly without intermediate duplication.")
+                            .font(.caption2)
+                            .foregroundColor(.secondary)
+                    }
+                    .padding(.vertical, 2)
                 }
 
-                // Section 3: Backup Mode
+                // Section 3: Backup Destination (Local vs Google Drive)
+                Section(header: Text("Destination")) {
+                    Picker("Destination", selection: $selectedDestination) {
+                        ForEach(BackupDestination.allCases) { dest in
+                            Label(dest.title, systemImage: dest.iconName).tag(dest)
+                        }
+                    }
+
+                    if selectedDestination == .googleDrive {
+                        if googleDrive.isAuthenticated {
+                            HStack {
+                                Image(systemName: "checkmark.circle.fill")
+                                    .foregroundColor(.green)
+                                Text("Linked as \(googleDrive.userEmail)")
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                            }
+                            Text("Archive will be compressed on-the-fly and streamed directly to Google Drive. Uses 0 MB of local storage.")
+                                .font(.caption2)
+                                .foregroundColor(.blue)
+                        } else {
+                            VStack(alignment: .leading, spacing: 8) {
+                                Text("Google Drive account is not connected.")
+                                    .font(.caption)
+                                    .foregroundColor(.orange)
+
+                                Button(action: { googleDrive.signIn() }) {
+                                    HStack {
+                                        Image(systemName: "link.badge.plus")
+                                        Text("Sign In with Google")
+                                    }
+                                    .font(.subheadline)
+                                    .foregroundColor(.white)
+                                    .padding(.horizontal, 14)
+                                    .padding(.vertical, 6)
+                                    .background(Color.blue)
+                                    .cornerRadius(8)
+                                }
+                            }
+                            .padding(.vertical, 4)
+                        }
+                    }
+                }
+
+                // Section 4: Backup Mode
                 Section(header: Text("Backup Type")) {
                     Picker("Mode", selection: $selectedMode) {
                         ForEach(BackupMode.allCases) { mode in
@@ -80,13 +135,13 @@ public struct BackupDetailSheet: View {
                         .foregroundColor(.secondary)
                 }
 
-                // Section 4: Options
+                // Section 5: Options
                 Section(header: Text("Options")) {
                     Toggle("Include Caches & Temp Files", isOn: $includeCaches)
                     TextField("Note / Label (e.g. Work Profile, Save 1)", text: $note)
                 }
 
-                // Section 5: Progress or Action
+                // Section 6: Action or Active Progress
                 Section {
                     if backupsVM.isPerformingOperation, let progress = backupsVM.activeProgress {
                         VStack(spacing: 12) {
@@ -112,14 +167,18 @@ public struct BackupDetailSheet: View {
                         Button(action: startBackupAction) {
                             HStack {
                                 Spacer()
-                                Label("Create Backup Now", systemImage: "arrow.down.doc.fill")
-                                    .font(.headline)
-                                    .foregroundColor(.white)
+                                Label(
+                                    selectedDestination == .googleDrive ? "Stream Direct to Google Drive" : "Create Streaming Backup",
+                                    systemImage: selectedDestination == .googleDrive ? "icloud.and.arrow.up.fill" : "arrow.down.doc.fill"
+                                )
+                                .font(.headline)
+                                .foregroundColor(.white)
                                 Spacer()
                             }
                             .padding(.vertical, 6)
                         }
-                        .listRowBackground(Color.blue)
+                        .disabled(selectedDestination == .googleDrive && !googleDrive.isAuthenticated)
+                        .listRowBackground(selectedDestination == .googleDrive && !googleDrive.isAuthenticated ? Color.gray : Color.blue)
                     }
                 }
             }
@@ -141,6 +200,7 @@ public struct BackupDetailSheet: View {
             for: app,
             mode: selectedMode,
             includeCaches: includeCaches,
+            destination: selectedDestination,
             note: note
         )
     }
