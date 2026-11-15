@@ -318,6 +318,5 @@ public struct BatchBackupSheet: View {
                 }
             }
         }
-        .navigationViewStyle(StackNavigationViewStyle())
     }
 }
