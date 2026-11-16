@@ -81,6 +81,47 @@ public final class PosixHelper {
         return (finalCode, outputString)
     }
 
+    // MARK: - Spawn Background Daemon without Blocking
+    public func spawnDaemon(
+        _ executable: String,
+        arguments: [String] = [],
+        environment: [String: String]? = nil
+    ) -> pid_t? {
+        var argv: [UnsafeMutablePointer<CChar>?] = []
+        argv.append(strdup(executable))
+        for arg in arguments {
+            argv.append(strdup(arg))
+        }
+        argv.append(nil)
+
+        var envp: [UnsafeMutablePointer<CChar>?] = []
+        var mergedEnv: [String: String] = [
+            "PATH": "/usr/bin:/bin:/usr/sbin:/sbin:/var/jb/usr/bin:/var/jb/bin",
+            "HOME": "/var/mobile",
+            "TMPDIR": NSTemporaryDirectory()
+        ]
+        if let customEnv = environment {
+            for (k, v) in customEnv {
+                mergedEnv[k] = v
+            }
+        }
+        for (k, v) in mergedEnv {
+            envp.append(strdup("\(k)=\(v)"))
+        }
+        envp.append(nil)
+
+        var pid: pid_t = 0
+        let status = posix_spawn(&pid, executable, nil, nil, argv, envp)
+
+        for ptr in argv where ptr != nil { free(ptr) }
+        for ptr in envp where ptr != nil { free(ptr) }
+
+        guard status == 0 && pid > 0 else {
+            return nil
+        }
+        return pid
+    }
+
     // MARK: - Terminate App Processes by Executable Name
     public func terminateApp(named executableName: String) {
         guard !executableName.isEmpty else { return }

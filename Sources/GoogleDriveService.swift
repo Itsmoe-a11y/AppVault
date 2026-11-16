@@ -156,7 +156,7 @@ public final class GoogleDriveService: NSObject, ObservableObject, ASWebAuthenti
         // Secure migration from plaintext UserDefaults to Keychain
         migrateTokensFromUserDefaultsIfNeeded()
 
-        if let token = accessToken, !token.isEmpty {
+        if (accessToken != nil && !accessToken!.isEmpty) || (refreshToken != nil && !refreshToken!.isEmpty) {
             self.isAuthenticated = true
             self.userEmail = UserDefaults.standard.string(forKey: "gdrive_user_email") ?? ""
             self.userName = UserDefaults.standard.string(forKey: "gdrive_user_name") ?? ""

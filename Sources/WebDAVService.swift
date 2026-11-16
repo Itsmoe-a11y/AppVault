@@ -131,10 +131,16 @@ public final class WebDAVService: ObservableObject {
     private static let keychainPasswordAccount = "webdav_password"
 
     @Published public var serverURL: String {
-        didSet { UserDefaults.standard.set(serverURL, forKey: "webdav_server_url") }
+        didSet {
+            UserDefaults.standard.set(serverURL, forKey: "webdav_server_url")
+            updateConfiguredState()
+        }
     }
     @Published public var username: String {
-        didSet { UserDefaults.standard.set(username, forKey: "webdav_username") }
+        didSet {
+            UserDefaults.standard.set(username, forKey: "webdav_username")
+            updateConfiguredState()
+        }
     }
     @Published public var password: String {
         didSet {
@@ -145,6 +151,11 @@ public final class WebDAVService: ObservableObject {
     @Published public var isConfigured: Bool = false
     @Published public var remoteFiles: [WebDAVFile] = []
     @Published public var isLoading: Bool = false
+
+    private func updateConfiguredState() {
+        let clean = serverURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.isConfigured = !clean.isEmpty && (clean.hasPrefix("http://") || clean.hasPrefix("https://"))
+    }
 
     private init() {
         self.serverURL = UserDefaults.standard.string(forKey: "webdav_server_url") ?? ""
@@ -159,7 +170,7 @@ public final class WebDAVService: ObservableObject {
             self.password = KeychainService.shared.loadPassword(service: Self.keychainService, account: Self.keychainPasswordAccount) ?? ""
         }
 
-        self.isConfigured = !serverURL.isEmpty && !username.isEmpty
+        updateConfiguredState()
     }
 
     // MARK: - Basic Auth Header (RFC 7617) with CRLF injection protection

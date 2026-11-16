@@ -14,10 +14,10 @@ on:
         type: boolean
         default: true
       release_tag:
-        description: 'Release Tag (defaults to v2.1.6)'
+        description: 'Release Tag (defaults to v2.1.7)'
         required: false
         type: string
-        default: 'v2.1.6'
+        default: 'v2.1.7'
 
 permissions:
   contents: write
@@ -86,25 +86,26 @@ jobs:
         if: ${{ github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && github.event.inputs.upload_release == 'true') }}
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ github.event.inputs.release_tag || 'v2.1.6' }}
-          name: "AppVault ${{ github.event.inputs.release_tag || 'v2.1.6' }}"
+          tag_name: ${{ github.event.inputs.release_tag || 'v2.1.7' }}
+          name: "AppVault ${{ github.event.inputs.release_tag || 'v2.1.7' }}"
           body: |
-            ## AppVault v2.1.6 - High-Throughput 200+ App Sizing Engine
+            ## AppVault v2.1.7 - Native Rclone & Token-Free Google Drive Integration
 
             AppVault is an unsandboxed application for **TrollStore** and **jailbroken** iOS devices (iOS 15.0 - 17.0+).
 
-            ### Highlights & Critical Fixes in v2.1.6:
-            1. 🚀 **Continuous Sliding-Window Concurrency (6 Workers)**:
-               - Eradicated Head-of-Line blocking in the app sizing pipeline. Giant apps (e.g. 30GB games, WhatsApp with 100k files) no longer block other apps from calculating.
-               - As each worker completes an app, it immediately pulls the next app from the queue while the UI updates continuously in real-time every 0.25s.
-               - Sizing 200+ apps across device CPU cores finishes in seconds without stalling.
-            2. 🧹 **Autorelease Pool Isolation & Lightweight Relative Pathing**:
-               - Wrapped directory traversals inside `autoreleasepool`, eliminating memory accumulation across hundreds of thousands of enumerated files.
-               - Used `.producesRelativePathURLs` and cooperative 2000-item cancellation checkpoints.
-            3. 💾 **Debounced Disk Cache Persistence**:
-               - Debounced `UserDefaults` cache commits during active scanning, eliminating flash I/O throttling from 200 repeated synchronous disk writes.
-            4. 📊 **Unambiguous UI State**:
-               - Explicitly shows `• Calculating...` for all pending apps until sizing is fully verified.
+            ### Highlights & Features in v2.1.7:
+            1. 🔄 **Native Rclone Google Drive Auto-Import**:
+               - Automatically detects `rclone.conf` on jailbroken/rootless iOS (`/var/mobile/.config/rclone/rclone.conf`, etc.).
+               - Allows 1-tap connection to any existing Google Drive remote with zero manual OAuth setup, client IDs, or browser redirects.
+               - Includes built-in fallback OAuth credentials matching rclone defaults so automated background token renewals succeed seamlessly.
+            2. 🌐 **Local Rclone WebDAV Bridge Daemon**:
+               - Seamlessly start and stop local `rclone serve webdav <remote>: --addr 127.0.0.1:8085 --no-auth` directly within the app using POSIX daemon spawning.
+               - Anonymous local WebDAV support: connect AppVault to `http://127.0.0.1:8085/` with zero passwords needed.
+            3. 📋 **In-App Rclone Config Importer**:
+               - Dedicated modal sheet to paste or import `rclone.conf` from clipboard or file, instantly parsing all remotes.
+            4. 🚀 **All Previous High-Performance Enhancements**:
+               - Continuous 6-worker sliding-window sizing pipeline for 200+ apps.
+               - Native iOS document picker export sheet with iPad popover compatibility.
 
             ### Installation:
             - **TrollStore**: Download `AppVault.tipa` (or `AppVault.ipa`) and open in TrollStore.

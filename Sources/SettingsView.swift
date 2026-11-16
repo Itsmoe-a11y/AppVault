@@ -5,8 +5,10 @@ public struct SettingsView: View {
     @ObservedObject var googleDrive = GoogleDriveService.shared
     @ObservedObject var webServer = LocalWebServer.shared
     @ObservedObject var webdav = WebDAVService.shared
+    @ObservedObject var rclone = RcloneHelper.shared
     @State private var showAdvancedOAuth = false
     @State private var showGoogleGuide = false
+    @State private var showRcloneConfSheet = false
     @State private var directTokenInput = ""
 
     public init() {}
@@ -188,18 +190,167 @@ public struct SettingsView: View {
                     }
                 }
 
-                // Section 3: WebDAV / Nextcloud / Synology NAS
+                // Section 3: Rclone Integration (Token-Free Cloud)
+                Section(header: Text("Rclone Integration (Token-Free Cloud)")) {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("Connect your existing rclone Google Drive remote with 1 tap. Bypasses Google OAuth browser setup entirely.")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+
+                        if let msg = rclone.statusMessage {
+                            Text(msg)
+                                .font(.caption2)
+                                .foregroundColor(.blue)
+                                .padding(.vertical, 2)
+                        }
+                    }
+
+                    if rclone.detectedRemotes.isEmpty {
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text("No rclone remotes found in standard locations.")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+
+                            HStack {
+                                Button(action: {
+                                    rclone.scanEnvironment()
+                                }) {
+                                    Label("Re-scan Device", systemImage: "arrow.clockwise")
+                                }
+                                .font(.caption)
+
+                                Spacer()
+
+                                Button(action: {
+                                    showRcloneConfSheet = true
+                                }) {
+                                    Label("Paste / Import rclone.conf", systemImage: "doc.badge.plus")
+                                }
+                                .font(.caption)
+                            }
+                        }
+                        .padding(.vertical, 4)
+                    } else {
+                        ForEach(rclone.detectedRemotes) { remote in
+                            VStack(alignment: .leading, spacing: 6) {
+                                HStack {
+                                    Image(systemName: remote.type == "drive" ? "externaldrive.badge.icloud" : "server.rack")
+                                        .foregroundColor(.blue)
+                                    Text(remote.name)
+                                        .font(.headline)
+                                    Spacer()
+                                    Text(remote.type)
+                                        .font(.caption2)
+                                        .padding(.horizontal, 6)
+                                        .padding(.vertical, 2)
+                                        .background(Color.secondary.opacity(0.15))
+                                        .cornerRadius(4)
+                                }
+
+                                HStack(spacing: 10) {
+                                    if remote.type == "drive" && (remote.refreshToken != nil || remote.accessToken != nil) {
+                                        Button(action: {
+                                            _ = rclone.importGoogleDriveTokens(from: remote)
+                                        }) {
+                                            Text("Connect Google Drive")
+                                                .font(.caption)
+                                                .fontWeight(.semibold)
+                                                .foregroundColor(.white)
+                                                .padding(.horizontal, 10)
+                                                .padding(.vertical, 6)
+                                                .background(Color.green)
+                                                .cornerRadius(6)
+                                        }
+                                    }
+
+                                    if rclone.isRcloneBinaryPresent {
+                                        if rclone.isBridgeRunning && rclone.selectedRemoteName == remote.name {
+                                            Button(action: {
+                                                rclone.stopWebDAVBridge()
+                                            }) {
+                                                Text("Stop Local WebDAV")
+                                                    .font(.caption)
+                                                    .foregroundColor(.red)
+                                                    .padding(.horizontal, 8)
+                                                    .padding(.vertical, 6)
+                                                    .background(Color.red.opacity(0.1))
+                                                    .cornerRadius(6)
+                                            }
+                                        } else {
+                                            Button(action: {
+                                                _ = rclone.startWebDAVBridge(remoteName: remote.name)
+                                            }) {
+                                                Text("Serve WebDAV (127.0.0.1:8085)")
+                                                    .font(.caption)
+                                                    .foregroundColor(.blue)
+                                                    .padding(.horizontal, 8)
+                                                    .padding(.vertical, 6)
+                                                    .background(Color.blue.opacity(0.1))
+                                                    .cornerRadius(6)
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            .padding(.vertical, 4)
+                        }
+
+                        HStack {
+                            Button(action: {
+                                rclone.scanEnvironment()
+                            }) {
+                                Label("Re-scan", systemImage: "arrow.clockwise")
+                            }
+                            .font(.caption)
+
+                            Spacer()
+
+                            Button(action: {
+                                showRcloneConfSheet = true
+                            }) {
+                                Label("Edit / Import Config", systemImage: "doc.badge.plus")
+                            }
+                            .font(.caption)
+                        }
+                    }
+
+                    if rclone.isBridgeRunning {
+                        HStack {
+                            Image(systemName: "antenna.radiowaves.left.and.right")
+                                .foregroundColor(.green)
+                            Text("Active Local WebDAV Bridge: http://127.0.0.1:\(rclone.activeBridgePort)/")
+                                .font(.caption2)
+                                .foregroundColor(.green)
+                        }
+                    }
+                }
+
+                // Section 4: WebDAV / Nextcloud / Synology NAS
                 Section(header: Text("WebDAV / Nextcloud / NAS")) {
-                    TextField("Server URL (https://...)", text: $webdav.serverURL)
+                    HStack {
+                        TextField("Server URL (http://...)", text: $webdav.serverURL)
+                            .autocapitalization(.none)
+                            .disableAutocorrection(true)
+                            .font(.system(size: 12, design: .monospaced))
+
+                        Button("Local Rclone") {
+                            webdav.serverURL = "http://127.0.0.1:8085/"
+                            webdav.username = ""
+                            webdav.password = ""
+                            webdav.updateConfiguredState()
+                        }
+                        .font(.caption2)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 4)
+                        .background(Color.blue.opacity(0.15))
+                        .cornerRadius(6)
+                    }
+
+                    TextField("Username (Optional for local bridge)", text: $webdav.username)
                         .autocapitalization(.none)
                         .disableAutocorrection(true)
-                        .font(.system(size: 12, design: .monospaced))
 
-                    TextField("Username", text: $webdav.username)
-                        .autocapitalization(.none)
-                        .disableAutocorrection(true)
-
-                    SecureField("Password", text: $webdav.password)
+                    SecureField("Password (Optional for local bridge)", text: $webdav.password)
 
                     Button("Test & Save Connection") {
                         Task {
@@ -283,7 +434,7 @@ public struct SettingsView: View {
                     HStack {
                         Text("App Version")
                         Spacer()
-                        Text("2.1.6 (High-Concurrency Sizing Engine)")
+                        Text("2.1.7 (Rclone & Native Cloud)")
                             .foregroundColor(.secondary)
                     }
 
@@ -315,6 +466,9 @@ public struct SettingsView: View {
         .navigationViewStyle(StackNavigationViewStyle())
         .sheet(isPresented: $showGoogleGuide) {
             GoogleSetupGuideSheet()
+        }
+        .sheet(isPresented: $showRcloneConfSheet) {
+            RcloneConfSheet()
         }
     }
 }
@@ -532,5 +686,87 @@ public struct GoogleSetupGuideSheet: View {
                     .foregroundColor(.secondary)
             }
         }
+    }
+}
+
+// MARK: - Rclone Configuration Sheet
+public struct RcloneConfSheet: View {
+    @Environment(\.presentationMode) var presentationMode
+    @ObservedObject var rclone = RcloneHelper.shared
+    @State private var configText: String = ""
+    @State private var alertMessage: String? = nil
+    @State private var showAlert: Bool = false
+
+    public var body: some View {
+        NavigationView {
+            Form {
+                Section(header: Text("rclone.conf Content")) {
+                    Text("Paste the contents of your rclone.conf file below. AppVault will automatically parse your remotes and Google Drive credentials.")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+
+                    TextEditor(text: $configText)
+                        .font(.system(size: 11, design: .monospaced))
+                        .frame(minHeight: 200)
+
+                    Button(action: {
+                        if let clip = UIPasteboard.general.string, !clip.isEmpty {
+                            configText = clip
+                        }
+                    }) {
+                        Label("Paste from Clipboard", systemImage: "doc.on.clipboard")
+                    }
+                    .font(.caption)
+                }
+
+                Section(header: Text("Actions")) {
+                    Button(action: {
+                        let trimmed = configText.trimmingCharacters(in: .whitespacesAndNewlines)
+                        if trimmed.isEmpty {
+                            alertMessage = "Configuration text is empty."
+                            showAlert = true
+                        } else if rclone.importFromConfString(trimmed, saveToAppStorage: true) {
+                            presentationMode.wrappedValue.dismiss()
+                        } else {
+                            alertMessage = "Could not find any valid remote sections in the text."
+                            showAlert = true
+                        }
+                    }) {
+                        HStack {
+                            Spacer()
+                            Text("Parse & Save Remotes")
+                                .fontWeight(.semibold)
+                            Spacer()
+                        }
+                    }
+                    .disabled(configText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                }
+
+                Section(header: Text("Where to find rclone.conf")) {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("• Jailbroken iOS: /var/mobile/.config/rclone/rclone.conf")
+                        Text("• Windows: %APPDATA%\\rclone\\rclone.conf")
+                        Text("• macOS / Linux: ~/.config/rclone/rclone.conf")
+                        Text("• Android / Termux: ~/.config/rclone/rclone.conf")
+                        Text("• Or run: 'rclone config file' in any terminal.")
+                    }
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+                }
+            }
+            .navigationTitle("Import rclone.conf")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    Button("Done") {
+                        presentationMode.wrappedValue.dismiss()
+                    }
+                }
+            }
+            .alert(isPresented: $showAlert) {
+                Alert(title: Text("Rclone Config"), message: Text(alertMessage ?? ""), dismissButton: .default(Text("OK")))
+            }
+        }
+        .navigationViewStyle(StackNavigationViewStyle())
     }
 }
