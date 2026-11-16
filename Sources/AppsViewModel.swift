@@ -152,38 +152,62 @@ public final class AppsViewModel: ObservableObject {
                 return
             }
 
-            // High performance bounded concurrent sizing (4 workers)
-            let batchSize = 4
-            var index = 0
-            while index < orderedIndices.count {
-                guard !Task.isCancelled else { break }
-                let chunkEnd = min(index + batchSize, orderedIndices.count)
-                let chunk = Array(orderedIndices[index..<chunkEnd])
+            // High-throughput sliding-window worker pool (6 concurrent workers)
+            // Eliminates head-of-line blocking so large apps never freeze other apps
+            let maxWorkers = 6
+            var nextToSubmit = 0
 
-                await withTaskGroup(of: (Int, Int64, Int64, Int64).self) { group in
-                    for idx in chunk {
-                        let app = currentApps[idx]
-                        group.addTask {
-                            let sizes = AppDiscoveryService.shared.calculateAppSizes(for: app)
-                            return (idx, sizes.appSize, sizes.dataSize, sizes.groupSize)
-                        }
+            await withTaskGroup(of: (Int, Int64, Int64, Int64).self) { group in
+                // Initial saturation of worker pool
+                while nextToSubmit < orderedIndices.count && nextToSubmit < maxWorkers {
+                    let idx = orderedIndices[nextToSubmit]
+                    let app = currentApps[idx]
+                    group.addTask {
+                        let sizes = AppDiscoveryService.shared.calculateAppSizes(for: app)
+                        return (idx, sizes.appSize, sizes.dataSize, sizes.groupSize)
                     }
-
-                    for await (idx, appSize, dataSize, groupSize) in group {
-                        currentApps[idx].appSizeBytes = appSize
-                        currentApps[idx].dataSizeBytes = dataSize
-                        currentApps[idx].groupSizeBytes = groupSize
-                        currentApps[idx].isSized = true
-                    }
+                    nextToSubmit += 1
                 }
 
-                index = chunkEnd
-                let snapshot = currentApps
-                await MainActor.run {
-                    self.apps = snapshot
+                var lastUIUpdateTime = Date()
+                var completedBatchCount = 0
+
+                // As soon as ANY single worker finishes: update that app and submit the next unsized app!
+                for await (idx, appSize, dataSize, groupSize) in group {
+                    guard !Task.isCancelled else { break }
+
+                    currentApps[idx].appSizeBytes = appSize
+                    currentApps[idx].dataSizeBytes = dataSize
+                    currentApps[idx].groupSizeBytes = groupSize
+                    currentApps[idx].isSized = true
+                    completedBatchCount += 1
+
+                    // Immediately dispatch the next app so the worker thread is never idle
+                    if nextToSubmit < orderedIndices.count {
+                        let nextIdx = orderedIndices[nextToSubmit]
+                        let nextApp = currentApps[nextIdx]
+                        group.addTask {
+                            let sizes = AppDiscoveryService.shared.calculateAppSizes(for: nextApp)
+                            return (nextIdx, sizes.appSize, sizes.dataSize, sizes.groupSize)
+                        }
+                        nextToSubmit += 1
+                    }
+
+                    // Smooth UI streaming: push updates every 3 completed apps or every 0.25s
+                    let now = Date()
+                    if completedBatchCount >= 3 || now.timeIntervalSince(lastUIUpdateTime) >= 0.25 || nextToSubmit == orderedIndices.count {
+                        let snapshot = currentApps
+                        await MainActor.run {
+                            self.apps = snapshot
+                        }
+                        lastUIUpdateTime = now
+                        completedBatchCount = 0
+                    }
                 }
             }
 
+            // Final persistent disk commit and state completion
+            AppDiscoveryService.shared.flushSizeCacheToDisk()
             await MainActor.run {
                 self.apps = currentApps
                 self.isScanning = false

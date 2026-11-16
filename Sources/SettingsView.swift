@@ -283,7 +283,7 @@ public struct SettingsView: View {
                     HStack {
                         Text("App Version")
                         Spacer()
-                        Text("2.1.5 (Export & Sizing Engine Overhaul)")
+                        Text("2.1.6 (High-Concurrency Sizing Engine)")
                             .foregroundColor(.secondary)
                     }
 

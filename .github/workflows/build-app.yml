@@ -14,10 +14,10 @@ on:
         type: boolean
         default: true
       release_tag:
-        description: 'Release Tag (defaults to v2.1.5)'
+        description: 'Release Tag (defaults to v2.1.6)'
         required: false
         type: string
-        default: 'v2.1.5'
+        default: 'v2.1.6'
 
 permissions:
   contents: write
@@ -86,24 +86,25 @@ jobs:
         if: ${{ github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && github.event.inputs.upload_release == 'true') }}
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ github.event.inputs.release_tag || 'v2.1.5' }}
-          name: "AppVault ${{ github.event.inputs.release_tag || 'v2.1.5' }}"
+          tag_name: ${{ github.event.inputs.release_tag || 'v2.1.6' }}
+          name: "AppVault ${{ github.event.inputs.release_tag || 'v2.1.6' }}"
           body: |
-            ## AppVault v2.1.5 - Export & Sizing Engine Overhaul
+            ## AppVault v2.1.6 - High-Throughput 200+ App Sizing Engine
 
             AppVault is an unsandboxed application for **TrollStore** and **jailbroken** iOS devices (iOS 15.0 - 17.0+).
 
-            ### Highlights & Critical Fixes in v2.1.5:
-            1. 📤 **Crash-Proof Export & Share Architecture**:
-               - Fixed fatal `NSInvalidArgumentException` crash triggered by `permittedArrowDirections = []` in popover presentation. Set to `.any` with centered source rect.
-               - Added `BackupActivityItemSource: NSObject, UIActivityItemSource` with `LPLinkMetadata` to prevent LinkPresentation crash on iOS 16 with `.adbk` files.
-               - Added **Save to Files (iCloud / Local)** via native `UIDocumentPickerViewController(forExporting:asCopy:)` alongside **Share / AirDrop**.
-            2. ⚡ **High-Speed Bounded Concurrent App Sizing**:
-               - Replaced slow sequential app sizing with a bounded 4-worker concurrent task group (`withTaskGroup`).
-               - Upgraded `directorySize` to use `resourceValues(forKeys:)` (`getattrlistbulk`), eliminating individual `lstat()` syscall overhead per file.
-               - Fixed AppGroup sizing and archiving deduplication: unique directory paths are only enumerated and archived once, eliminating WhatsApp 4x duplicates.
-               - Fixed 0-byte cache poisoning: un-sized apps are no longer permanently cached with 0s.
-               - Added real-time progress indicators in `BackupDetailSheet` with immediate high-priority calculation.
+            ### Highlights & Critical Fixes in v2.1.6:
+            1. 🚀 **Continuous Sliding-Window Concurrency (6 Workers)**:
+               - Eradicated Head-of-Line blocking in the app sizing pipeline. Giant apps (e.g. 30GB games, WhatsApp with 100k files) no longer block other apps from calculating.
+               - As each worker completes an app, it immediately pulls the next app from the queue while the UI updates continuously in real-time every 0.25s.
+               - Sizing 200+ apps across device CPU cores finishes in seconds without stalling.
+            2. 🧹 **Autorelease Pool Isolation & Lightweight Relative Pathing**:
+               - Wrapped directory traversals inside `autoreleasepool`, eliminating memory accumulation across hundreds of thousands of enumerated files.
+               - Used `.producesRelativePathURLs` and cooperative 2000-item cancellation checkpoints.
+            3. 💾 **Debounced Disk Cache Persistence**:
+               - Debounced `UserDefaults` cache commits during active scanning, eliminating flash I/O throttling from 200 repeated synchronous disk writes.
+            4. 📊 **Unambiguous UI State**:
+               - Explicitly shows `• Calculating...` for all pending apps until sizing is fully verified.
 
             ### Installation:
             - **TrollStore**: Download `AppVault.tipa` (or `AppVault.ipa`) and open in TrollStore.

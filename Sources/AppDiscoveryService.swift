@@ -32,10 +32,22 @@ public final class AppDiscoveryService {
         }
     }
 
-    private func saveSizeCacheToDisk() {
+    private var lastDiskSaveTime = Date.distantPast
+    private func saveSizeCacheToDisk(force: Bool = false) {
+        let now = Date()
+        if !force && now.timeIntervalSince(lastDiskSaveTime) < 2.0 {
+            return
+        }
+        lastDiskSaveTime = now
         if let data = try? JSONEncoder().encode(appSizeCache) {
             UserDefaults.standard.set(data, forKey: "appvault_size_cache_v1")
         }
+    }
+
+    public func flushSizeCacheToDisk() {
+        sizeCacheLock.lock()
+        defer { sizeCacheLock.unlock() }
+        saveSizeCacheToDisk(force: true)
     }
 
     public func invalidateCache() {
@@ -528,7 +540,7 @@ public final class AppDiscoveryService {
             groupSize: groupSize,
             timestamp: Date()
         )
-        saveSizeCacheToDisk()
+        saveSizeCacheToDisk(force: false)
         sizeCacheLock.unlock()
 
         return (appSize, dataSize, groupSize)
@@ -540,45 +552,51 @@ public final class AppDiscoveryService {
 
     public func directorySize(atPath path: String) -> Int64 {
         guard !path.isEmpty else { return 0 }
-        let url = URL(fileURLWithPath: path)
+        return autoreleasepool {
+            let url = URL(fileURLWithPath: path)
 
-        var isDir: ObjCBool = false
-        guard fileManager.fileExists(atPath: path, isDirectory: &isDir) else { return 0 }
+            var isDir: ObjCBool = false
+            guard fileManager.fileExists(atPath: path, isDirectory: &isDir) else { return 0 }
 
-        if !isDir.boolValue {
-            var st = stat()
-            if lstat(path, &st) == 0 {
-                return Int64(st.st_size)
-            }
-            return 0
-        }
-
-        var totalSize: Int64 = 0
-        let keys: [URLResourceKey] = [.fileSizeKey, .isRegularFileKey, .isSymbolicLinkKey]
-
-        guard let enumerator = fileManager.enumerator(
-            at: url,
-            includingPropertiesForKeys: keys,
-            options: [],
-            errorHandler: { _, _ in true }
-        ) else {
-            return 0
-        }
-
-        for case let fileURL as URL in enumerator {
-            guard let values = try? fileURL.resourceValues(forKeys: Set(keys)) else { continue }
-
-            if values.isSymbolicLink == true {
-                enumerator.skipDescendants()
-                continue
+            if !isDir.boolValue {
+                var st = stat()
+                if lstat(path, &st) == 0 {
+                    return Int64(st.st_size)
+                }
+                return 0
             }
 
-            if values.isRegularFile == true {
-                totalSize += Int64(values.fileSize ?? 0)
-            }
-        }
+            var totalSize: Int64 = 0
+            let keys: [URLResourceKey] = [.fileSizeKey, .isRegularFileKey, .isSymbolicLinkKey]
 
-        return totalSize
+            guard let enumerator = fileManager.enumerator(
+                at: url,
+                includingPropertiesForKeys: keys,
+                options: [.producesRelativePathURLs],
+                errorHandler: { _, _ in true }
+            ) else {
+                return 0
+            }
+
+            var count = 0
+            for case let fileURL as URL in enumerator {
+                count += 1
+                if count % 2000 == 0 && Task.isCancelled { break }
+
+                guard let values = try? fileURL.resourceValues(forKeys: Set(keys)) else { continue }
+
+                if values.isSymbolicLink == true {
+                    enumerator.skipDescendants()
+                    continue
+                }
+
+                if values.isRegularFile == true {
+                    totalSize += Int64(values.fileSize ?? 0)
+                }
+            }
+
+            return totalSize
+        }
     }
 
     // MARK: - Reflection Helpers

@@ -208,25 +208,25 @@ struct AppRowView: View {
                         .font(.system(size: 11))
                         .foregroundColor(.secondary)
 
-                    let totalData = app.dataSizeBytes + app.groupSizeBytes
-                    if totalData > 0 {
-                        Text("\u{2022} Data: \(ByteCountFormatter.string(fromByteCount: totalData, countStyle: .file))")
-                            .font(.system(size: 11))
-                            .foregroundColor(.blue)
-                    }
-
-                    if app.appSizeBytes > 0 {
-                        Text("\u{2022} App: \(ByteCountFormatter.string(fromByteCount: app.appSizeBytes, countStyle: .file))")
+                    if !app.isSized {
+                        Text("\u{2022} Calculating...")
                             .font(.system(size: 11))
                             .foregroundColor(.secondary)
-                    }
+                    } else {
+                        let totalData = app.dataSizeBytes + app.groupSizeBytes
+                        if totalData > 0 {
+                            Text("\u{2022} Data: \(ByteCountFormatter.string(fromByteCount: totalData, countStyle: .file))")
+                                .font(.system(size: 11))
+                                .foregroundColor(.blue)
+                        }
 
-                    if totalData == 0 && app.appSizeBytes == 0 {
-                        if !app.isSized {
-                            Text("\u{2022} Calculating...")
+                        if app.appSizeBytes > 0 {
+                            Text("\u{2022} App: \(ByteCountFormatter.string(fromByteCount: app.appSizeBytes, countStyle: .file))")
                                 .font(.system(size: 11))
                                 .foregroundColor(.secondary)
-                        } else {
+                        }
+
+                        if totalData == 0 && app.appSizeBytes == 0 {
                             Text("\u{2022} 0 KB")
                                 .font(.system(size: 11))
                                 .foregroundColor(.secondary)
