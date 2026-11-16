@@ -54,6 +54,10 @@ public final class AppDiscoveryService {
               Date().timeIntervalSince(cached.timestamp) < sizeCacheTTL else {
             return nil
         }
+        // Do not return as valid cache if all values are 0 (e.g. before initial scan completed)
+        if cached.appSize == 0 && cached.dataSize == 0 && cached.groupSize == 0 {
+            return nil
+        }
         return (cached.appSize, cached.dataSize, cached.groupSize)
     }
 
@@ -199,10 +203,6 @@ public final class AppDiscoveryService {
                                     (dict["MCMMetadataBundleID"] as? String) ??
                                     (dict["CFBundleIdentifier"] as? String) {
                     maps.groupContainers[identifier] = dir
-                    maps.groupContainers[identifier.lowercased()] = dir
-                    let clean = cleanIdentifier(identifier)
-                    maps.groupContainers[clean] = dir
-                    maps.groupContainers[clean.lowercased()] = dir
                 }
             }
         }
@@ -318,8 +318,7 @@ public final class AppDiscoveryService {
                     let groupIDs = extractAppGroupsFromProvisionOrEntitlements(data: data)
                     for gid in groupIDs {
                         if let gURL = containerMaps.groupContainers[gid] ??
-                                      containerMaps.groupContainers[gid.lowercased()] ??
-                                      containerMaps.groupContainers[cleanIdentifier(gid).lowercased()] {
+                                      containerMaps.groupContainers[cleanIdentifier(gid)] {
                             groups[gid] = gURL
                         }
                     }
@@ -327,10 +326,13 @@ public final class AppDiscoveryService {
             }
         }
 
-        // 2. Match any filesystem groupContainers that match this app's bundleID
+        // 2. Match any filesystem groupContainers that match this app's bundleID (deduplicated by directory path)
+        var existingPaths = Set(groups.values.map { $0.standardized.path })
         for (groupID, gURL) in containerMaps.groupContainers {
-            if groups[groupID] == nil && matchesAppGroup(groupID: groupID, bundleID: bundleID) {
+            let path = gURL.standardized.path
+            if !existingPaths.contains(path) && matchesAppGroup(groupID: groupID, bundleID: bundleID) {
                 groups[groupID] = gURL
+                existingPaths.insert(path)
             }
         }
 
@@ -493,7 +495,8 @@ public final class AppDiscoveryService {
         if !forceRefresh {
             sizeCacheLock.lock()
             if let cached = appSizeCache[app.bundleIdentifier],
-               Date().timeIntervalSince(cached.timestamp) < sizeCacheTTL {
+               Date().timeIntervalSince(cached.timestamp) < sizeCacheTTL,
+               (cached.appSize > 0 || cached.dataSize > 0 || cached.groupSize > 0) {
                 sizeCacheLock.unlock()
                 return (cached.appSize, cached.dataSize, cached.groupSize)
             }
@@ -512,8 +515,10 @@ public final class AppDiscoveryService {
             dataSize = directorySize(at: dataURL)
         }
 
-        for (_, groupURL) in app.groupContainerURLs {
-            groupSize += directorySize(at: groupURL)
+        // Deduplicate unique AppGroup directories by standardized path
+        let uniqueGroupPaths = Set(app.groupContainerURLs.values.map { $0.standardized.path })
+        for groupPath in uniqueGroupPaths {
+            groupSize += directorySize(atPath: groupPath)
         }
 
         sizeCacheLock.lock()
@@ -535,34 +540,41 @@ public final class AppDiscoveryService {
 
     public func directorySize(atPath path: String) -> Int64 {
         guard !path.isEmpty else { return 0 }
-        var rootSt = stat()
-        guard lstat(path, &rootSt) == 0 else { return 0 }
-        let rootMode = rootSt.st_mode & S_IFMT
-        if rootMode == S_IFREG {
-            return Int64(rootSt.st_size)
-        }
-        guard rootMode == S_IFDIR else { return 0 }
+        let url = URL(fileURLWithPath: path)
 
-        var totalSize: Int64 = 0
-        guard let enumerator = fileManager.enumerator(atPath: path) else {
+        var isDir: ObjCBool = false
+        guard fileManager.fileExists(atPath: path, isDirectory: &isDir) else { return 0 }
+
+        if !isDir.boolValue {
+            var st = stat()
+            if lstat(path, &st) == 0 {
+                return Int64(st.st_size)
+            }
             return 0
         }
 
-        while let subpath = enumerator.nextObject() as? String {
-            let fullPath = (path as NSString).appendingPathComponent(subpath)
-            var st = stat()
-            guard lstat(fullPath, &st) == 0 else { continue }
-            let fileType = st.st_mode & S_IFMT
+        var totalSize: Int64 = 0
+        let keys: [URLResourceKey] = [.fileSizeKey, .isRegularFileKey, .isSymbolicLinkKey]
 
-            // CRITICAL: Call skipDescendants() on symlinks so NSDirectoryEnumerator NEVER follows symlinks
-            // out into the filesystem or into circular loops!
-            if fileType == S_IFLNK {
+        guard let enumerator = fileManager.enumerator(
+            at: url,
+            includingPropertiesForKeys: keys,
+            options: [],
+            errorHandler: { _, _ in true }
+        ) else {
+            return 0
+        }
+
+        for case let fileURL as URL in enumerator {
+            guard let values = try? fileURL.resourceValues(forKeys: Set(keys)) else { continue }
+
+            if values.isSymbolicLink == true {
                 enumerator.skipDescendants()
                 continue
             }
 
-            if fileType == S_IFREG {
-                totalSize += Int64(st.st_size)
+            if values.isRegularFile == true {
+                totalSize += Int64(values.fileSize ?? 0)
             }
         }
 
@@ -573,27 +585,49 @@ public final class AppDiscoveryService {
     private func stringProperty(_ object: NSObject, selectorName: String) -> String? {
         let selector = Selector((selectorName))
         guard object.responds(to: selector),
-              let result = object.perform(selector)?.takeUnretainedValue() as? String else {
+              let unmanaged = object.perform(selector) else {
             return nil
         }
-        return result
+        return unmanaged.takeUnretainedValue() as? String
     }
 
     private func urlProperty(_ object: NSObject, selectorName: String) -> URL? {
         let selector = Selector((selectorName))
         guard object.responds(to: selector),
-              let result = object.perform(selector)?.takeUnretainedValue() as? URL else {
+              let unmanaged = object.perform(selector) else {
             return nil
         }
-        return result
+        let raw = unmanaged.takeUnretainedValue()
+        if let url = raw as? URL {
+            return url
+        }
+        if let str = raw as? String, !str.isEmpty {
+            return URL(fileURLWithPath: str)
+        }
+        return nil
     }
 
     private func groupContainersProperty(_ object: NSObject) -> [String: URL] {
         let selector = Selector(("groupContainerURLs"))
         guard object.responds(to: selector),
-              let dict = object.perform(selector)?.takeUnretainedValue() as? [String: URL] else {
+              let unmanaged = object.perform(selector) else {
             return [:]
         }
-        return dict
+        let raw = unmanaged.takeUnretainedValue()
+        if let dict = raw as? [String: URL] {
+            return dict
+        }
+        if let rawDict = raw as? [String: Any] {
+            var result: [String: URL] = [:]
+            for (k, v) in rawDict {
+                if let u = v as? URL {
+                    result[k] = u
+                } else if let s = v as? String {
+                    result[k] = URL(fileURLWithPath: s)
+                }
+            }
+            return result
+        }
+        return [:]
     }
 }

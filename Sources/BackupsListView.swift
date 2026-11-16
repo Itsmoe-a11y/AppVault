@@ -7,6 +7,7 @@ public struct BackupsListView: View {
     @State private var showDocumentPicker = false
     @State private var deleteTarget: BackupRecord? = nil
     @State private var deleteCloudTarget: GoogleDriveFile? = nil
+    @State private var exportTarget: BackupRecord? = nil
 
     public init() {}
 
@@ -141,6 +142,23 @@ public struct BackupsListView: View {
                     ]
                 )
             }
+            .actionSheet(item: $exportTarget) { record in
+                ActionSheet(
+                    title: Text("Export \(record.appName) Backup"),
+                    message: Text(record.archiveFileName),
+                    buttons: [
+                        .default(Text("Save to Files (iCloud / Local)")) {
+                            let url = backupsVM.fileURL(for: record)
+                            presentExportPicker(url: url)
+                        },
+                        .default(Text("Share / AirDrop")) {
+                            let url = backupsVM.fileURL(for: record)
+                            presentShareSheet(url: url)
+                        },
+                        .cancel()
+                    ]
+                )
+            }
         }
         .navigationViewStyle(StackNavigationViewStyle())
     }
@@ -176,8 +194,7 @@ public struct BackupsListView: View {
                                 backupsVM.restoreConfirmationRecord = record
                             },
                             onShare: {
-                                let url = backupsVM.fileURL(for: record)
-                                presentShareSheet(url: url)
+                                exportTarget = record
                             },
                             onRename: {
                                 backupsVM.renameTargetRecord = record

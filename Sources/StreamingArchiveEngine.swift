@@ -709,8 +709,11 @@ public final class StreamingArchiveEngine {
         // C. App Groups (if enabled)
         var savedGroups: [String] = []
         if includeAppGroups {
+            var seenGroupPaths = Set<String>()
             for (groupID, groupURL) in app.groupContainerURLs {
-                guard fileManager.fileExists(atPath: groupURL.path) else { continue }
+                let canonicalPath = groupURL.standardized.path
+                guard fileManager.fileExists(atPath: canonicalPath), !seenGroupPaths.contains(canonicalPath) else { continue }
+                seenGroupPaths.insert(canonicalPath)
                 savedGroups.append(groupID)
                 // Collect entire AppGroup directory (root databases, Message, Media, Documents, Library, etc.)
                 collectItems(rootURL: groupURL, baseArchivePath: "AppGroups/\(groupID)", includeCaches: includeCaches, into: &items, totalBytes: &totalBytesToProcess)

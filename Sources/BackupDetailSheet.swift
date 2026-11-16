@@ -59,23 +59,38 @@ public struct BackupDetailSheet: View {
                     HStack {
                         Label("App Binary", systemImage: "shippingbox")
                         Spacer()
-                        Text(ByteCountFormatter.string(fromByteCount: currentApp.appSizeBytes, countStyle: .file))
-                            .foregroundColor(.secondary)
+                        if currentApp.appSizeBytes > 0 || currentApp.isSized {
+                            Text(ByteCountFormatter.string(fromByteCount: currentApp.appSizeBytes, countStyle: .file))
+                                .foregroundColor(.secondary)
+                        } else {
+                            ProgressView()
+                                .scaleEffect(0.7)
+                        }
                     }
 
                     HStack {
                         Label("App Data Container", systemImage: "folder")
                         Spacer()
-                        Text(ByteCountFormatter.string(fromByteCount: currentApp.dataSizeBytes, countStyle: .file))
-                            .foregroundColor(.secondary)
+                        if currentApp.dataSizeBytes > 0 || currentApp.isSized {
+                            Text(ByteCountFormatter.string(fromByteCount: currentApp.dataSizeBytes, countStyle: .file))
+                                .foregroundColor(.secondary)
+                        } else {
+                            ProgressView()
+                                .scaleEffect(0.7)
+                        }
                     }
 
                     if !currentApp.groupContainerURLs.isEmpty {
                         HStack {
                             Label("Shared Groups (\(currentApp.groupContainerURLs.count))", systemImage: "rectangle.3.group")
                             Spacer()
-                            Text(ByteCountFormatter.string(fromByteCount: currentApp.groupSizeBytes, countStyle: .file))
-                                .foregroundColor(.secondary)
+                            if currentApp.groupSizeBytes > 0 || currentApp.isSized {
+                                Text(ByteCountFormatter.string(fromByteCount: currentApp.groupSizeBytes, countStyle: .file))
+                                    .foregroundColor(.secondary)
+                            } else {
+                                ProgressView()
+                                    .scaleEffect(0.7)
+                            }
                         }
                     }
 
@@ -294,9 +309,9 @@ public struct BackupDetailSheet: View {
                 }
             }
             .onAppear {
-                if currentApp.appSizeBytes == 0 && currentApp.dataSizeBytes == 0 {
+                if !currentApp.isSized || (currentApp.appSizeBytes == 0 && currentApp.dataSizeBytes == 0) {
                     Task.detached(priority: .userInitiated) {
-                        let sizes = AppDiscoveryService.shared.calculateAppSizes(for: currentApp)
+                        let sizes = AppDiscoveryService.shared.calculateAppSizes(for: currentApp, forceRefresh: true)
                         await MainActor.run {
                             currentApp.appSizeBytes = sizes.appSize
                             currentApp.dataSizeBytes = sizes.dataSize

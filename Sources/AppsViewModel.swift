@@ -152,25 +152,35 @@ public final class AppsViewModel: ObservableObject {
                 return
             }
 
-            var processedCount = 0
-            for idx in orderedIndices {
+            // High performance bounded concurrent sizing (4 workers)
+            let batchSize = 4
+            var index = 0
+            while index < orderedIndices.count {
                 guard !Task.isCancelled else { break }
+                let chunkEnd = min(index + batchSize, orderedIndices.count)
+                let chunk = Array(orderedIndices[index..<chunkEnd])
 
-                let app = currentApps[idx]
-                let sizes = AppDiscoveryService.shared.calculateAppSizes(for: app)
-                currentApps[idx].appSizeBytes = sizes.appSize
-                currentApps[idx].dataSizeBytes = sizes.dataSize
-                currentApps[idx].groupSizeBytes = sizes.groupSize
-                currentApps[idx].isSized = true
-
-                processedCount += 1
-
-                // Progressive update: stream UI updates every 2 apps, or on the last one
-                if processedCount % 2 == 0 || processedCount == orderedIndices.count {
-                    let snapshot = currentApps
-                    await MainActor.run {
-                        self.apps = snapshot
+                await withTaskGroup(of: (Int, Int64, Int64, Int64).self) { group in
+                    for idx in chunk {
+                        let app = currentApps[idx]
+                        group.addTask {
+                            let sizes = AppDiscoveryService.shared.calculateAppSizes(for: app)
+                            return (idx, sizes.appSize, sizes.dataSize, sizes.groupSize)
+                        }
                     }
+
+                    for await (idx, appSize, dataSize, groupSize) in group {
+                        currentApps[idx].appSizeBytes = appSize
+                        currentApps[idx].dataSizeBytes = dataSize
+                        currentApps[idx].groupSizeBytes = groupSize
+                        currentApps[idx].isSized = true
+                    }
+                }
+
+                index = chunkEnd
+                let snapshot = currentApps
+                await MainActor.run {
+                    self.apps = snapshot
                 }
             }
 
