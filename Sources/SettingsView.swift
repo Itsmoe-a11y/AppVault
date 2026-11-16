@@ -256,7 +256,7 @@ public struct SettingsView: View {
                     HStack {
                         Text("App Version")
                         Spacer()
-                        Text("2.1.2 (Production Hardened Edition)")
+                        Text("2.1.3 (Fast Disk Engine & Instant Size Cache)")
                             .foregroundColor(.secondary)
                     }
 

@@ -125,7 +125,10 @@ public final class AppsViewModel: ObservableObject {
 
         scanTask = Task.detached(priority: .userInitiated) {
             let discovered = AppDiscoveryService.shared.fetchInstalledApps()
-            guard !Task.isCancelled else { return }
+            guard !Task.isCancelled else {
+                await MainActor.run { self.isScanning = false }
+                return
+            }
 
             await MainActor.run {
                 self.apps = discovered
@@ -135,19 +138,36 @@ public final class AppsViewModel: ObservableObject {
                 }
             }
 
-            // Calculate storage sizes in background in a local copy, then update atomically
-            var sizedApps = discovered
-            for i in 0..<sizedApps.count {
+            guard !discovered.isEmpty else { return }
+
+            // Progressive size calculation: update UI incrementally as apps are sized
+            var currentApps = discovered
+            var updatedAny = false
+
+            for i in 0..<currentApps.count {
                 guard !Task.isCancelled else { break }
-                let sizes = AppDiscoveryService.shared.calculateAppSizes(for: sizedApps[i])
-                sizedApps[i].appSizeBytes = sizes.appSize
-                sizedApps[i].dataSizeBytes = sizes.dataSize
-                sizedApps[i].groupSizeBytes = sizes.groupSize
+
+                let app = currentApps[i]
+                // If sizes were not already populated from cache
+                if app.appSizeBytes == 0 && app.dataSizeBytes == 0 && app.groupSizeBytes == 0 {
+                    let sizes = AppDiscoveryService.shared.calculateAppSizes(for: app)
+                    currentApps[i].appSizeBytes = sizes.appSize
+                    currentApps[i].dataSizeBytes = sizes.dataSize
+                    currentApps[i].groupSizeBytes = sizes.groupSize
+                    updatedAny = true
+                }
+
+                // Progressive update: update UI every 3 apps or on the last app
+                if updatedAny && (i % 3 == 0 || i == currentApps.count - 1) {
+                    let snapshot = currentApps
+                    await MainActor.run {
+                        self.apps = snapshot
+                    }
+                }
             }
 
-            guard !Task.isCancelled else { return }
             await MainActor.run {
-                self.apps = sizedApps
+                self.apps = currentApps
                 self.isScanning = false
             }
         }

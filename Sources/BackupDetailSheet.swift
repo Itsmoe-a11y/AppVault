@@ -16,6 +16,7 @@ public struct BackupDetailSheet: View {
     @State private var encryptionPassword: String = ""
 
     // In-sheet execution state
+    @State private var currentApp: InstalledApp
     @State private var isExecuting: Bool = false
     @State private var currentProgress: OperationProgress? = nil
     @State private var executionError: String? = nil
@@ -23,6 +24,7 @@ public struct BackupDetailSheet: View {
 
     public init(app: InstalledApp) {
         self.app = app
+        _currentApp = State(initialValue: app)
     }
 
     public var body: some View {
@@ -57,22 +59,22 @@ public struct BackupDetailSheet: View {
                     HStack {
                         Label("App Binary", systemImage: "shippingbox")
                         Spacer()
-                        Text(ByteCountFormatter.string(fromByteCount: app.appSizeBytes, countStyle: .file))
+                        Text(ByteCountFormatter.string(fromByteCount: currentApp.appSizeBytes, countStyle: .file))
                             .foregroundColor(.secondary)
                     }
 
                     HStack {
                         Label("App Data Container", systemImage: "folder")
                         Spacer()
-                        Text(ByteCountFormatter.string(fromByteCount: app.dataSizeBytes, countStyle: .file))
+                        Text(ByteCountFormatter.string(fromByteCount: currentApp.dataSizeBytes, countStyle: .file))
                             .foregroundColor(.secondary)
                     }
 
-                    if !app.groupContainerURLs.isEmpty {
+                    if !currentApp.groupContainerURLs.isEmpty {
                         HStack {
-                            Label("Shared Groups (\(app.groupContainerURLs.count))", systemImage: "rectangle.3.group")
+                            Label("Shared Groups (\(currentApp.groupContainerURLs.count))", systemImage: "rectangle.3.group")
                             Spacer()
-                            Text(ByteCountFormatter.string(fromByteCount: app.groupSizeBytes, countStyle: .file))
+                            Text(ByteCountFormatter.string(fromByteCount: currentApp.groupSizeBytes, countStyle: .file))
                                 .foregroundColor(.secondary)
                         }
                     }
@@ -291,6 +293,18 @@ public struct BackupDetailSheet: View {
                     .disabled(isExecuting)
                 }
             }
+            .onAppear {
+                if currentApp.appSizeBytes == 0 && currentApp.dataSizeBytes == 0 {
+                    Task.detached(priority: .userInitiated) {
+                        let sizes = AppDiscoveryService.shared.calculateAppSizes(for: currentApp)
+                        await MainActor.run {
+                            currentApp.appSizeBytes = sizes.appSize
+                            currentApp.dataSizeBytes = sizes.dataSize
+                            currentApp.groupSizeBytes = sizes.groupSize
+                        }
+                    }
+                }
+            }
         }
         .navigationViewStyle(StackNavigationViewStyle())
     }
@@ -305,7 +319,7 @@ public struct BackupDetailSheet: View {
             do {
                 if self.selectedDestination == .googleDrive {
                     let record = try await BackupEngine.shared.createGoogleDriveStreamingBackup(
-                        for: self.app,
+                        for: self.currentApp,
                         mode: self.selectedMode,
                         includeCaches: self.includeCaches,
                         includeKeychain: self.includeKeychain,
@@ -323,13 +337,13 @@ public struct BackupDetailSheet: View {
                         self.backupsVM.refreshCloudBackups()
                     }
                 } else if self.selectedDestination == .webdav {
-                    let safeName = self.app.name.components(separatedBy: CharacterSet.alphanumerics.inverted).joined()
+                    let safeName = self.currentApp.name.components(separatedBy: CharacterSet.alphanumerics.inverted).joined()
                     let timestamp = Int(Date().timeIntervalSince1970)
-                    let archiveName = "\(safeName)_\(self.app.bundleIdentifier)_\(timestamp).adbk"
+                    let archiveName = "\(safeName)_\(self.currentApp.bundleIdentifier)_\(timestamp).adbk"
 
                     var uploadData = Data()
                     let record = try await StreamingArchiveEngine.shared.streamBackup(
-                        for: self.app,
+                        for: self.currentApp,
                         mode: self.selectedMode,
                         includeCaches: self.includeCaches,
                         includeKeychain: self.includeKeychain,
@@ -353,7 +367,7 @@ public struct BackupDetailSheet: View {
                     }
                 } else {
                     let record = try await BackupEngine.shared.createStreamingBackup(
-                        for: self.app,
+                        for: self.currentApp,
                         mode: self.selectedMode,
                         includeCaches: self.includeCaches,
                         includeKeychain: self.includeKeychain,

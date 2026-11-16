@@ -203,7 +203,7 @@ struct AppRowView: View {
                     .foregroundColor(.secondary)
                     .lineLimit(1)
 
-                HStack(spacing: 8) {
+                HStack(spacing: 6) {
                     Text("v\(app.version)")
                         .font(.system(size: 11))
                         .foregroundColor(.secondary)
@@ -213,14 +213,24 @@ struct AppRowView: View {
                         Text("\u{2022} Data: \(ByteCountFormatter.string(fromByteCount: totalData, countStyle: .file))")
                             .font(.system(size: 11))
                             .foregroundColor(.blue)
-                    } else if app.appSizeBytes > 0 {
+                    }
+
+                    if app.appSizeBytes > 0 {
                         Text("\u{2022} App: \(ByteCountFormatter.string(fromByteCount: app.appSizeBytes, countStyle: .file))")
                             .font(.system(size: 11))
                             .foregroundColor(.secondary)
-                    } else if isScanning {
-                        Text("\u{2022} Calculating...")
-                            .font(.system(size: 11))
-                            .foregroundColor(.secondary)
+                    }
+
+                    if totalData == 0 && app.appSizeBytes == 0 {
+                        if isScanning {
+                            Text("\u{2022} Calculating...")
+                                .font(.system(size: 11))
+                                .foregroundColor(.secondary)
+                        } else {
+                            Text("\u{2022} 0 KB")
+                                .font(.system(size: 11))
+                                .foregroundColor(.secondary)
+                        }
                     }
                 }
             }

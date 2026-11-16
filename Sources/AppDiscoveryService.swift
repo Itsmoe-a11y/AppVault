@@ -13,13 +13,47 @@ public final class AppDiscoveryService {
     private let cacheLock = NSLock()
     private let cacheTTL: TimeInterval = 60.0 // 60 seconds cache TTL
 
+    // MARK: - Thread-safe App Size Cache
+    private struct AppSizeCacheEntry {
+        let appSize: Int64
+        let dataSize: Int64
+        let groupSize: Int64
+        let timestamp: Date
+    }
+
+    private var appSizeCache: [String: AppSizeCacheEntry] = [:]
+    private let sizeCacheLock = NSLock()
+    private let sizeCacheTTL: TimeInterval = 600.0 // 10 minutes cache TTL
+
     private init() {}
 
     public func invalidateCache() {
         cacheLock.lock()
-        defer { cacheLock.unlock() }
         cachedContainerMaps = nil
         containerMapsCacheDate = nil
+        cacheLock.unlock()
+
+        invalidateSizeCache()
+    }
+
+    public func getCachedAppSizes(for bundleID: String) -> (appSize: Int64, dataSize: Int64, groupSize: Int64)? {
+        sizeCacheLock.lock()
+        defer { sizeCacheLock.unlock() }
+        guard let cached = appSizeCache[bundleID],
+              Date().timeIntervalSince(cached.timestamp) < sizeCacheTTL else {
+            return nil
+        }
+        return (cached.appSize, cached.dataSize, cached.groupSize)
+    }
+
+    public func invalidateSizeCache(for bundleID: String? = nil) {
+        sizeCacheLock.lock()
+        defer { sizeCacheLock.unlock() }
+        if let bID = bundleID {
+            appSizeCache.removeValue(forKey: bID)
+        } else {
+            appSizeCache.removeAll()
+        }
     }
 
     private func getContainerMaps(forceRefresh: Bool = false) -> ContainerMaps {
@@ -74,18 +108,36 @@ public final class AppDiscoveryService {
         var maps = ContainerMaps()
 
         // 1. Data Containers: /var/mobile/Containers/Data/Application/<UUID>
-        let dataRoot = URL(fileURLWithPath: "/var/mobile/Containers/Data/Application")
-        if let dataUUIDs = try? fileManager.contentsOfDirectory(at: dataRoot, includingPropertiesForKeys: nil) {
-            for dir in dataUUIDs {
-                let meta = dir.appendingPathComponent(".com.apple.mobile_container_manager.metadata.plist")
-                if let data = try? Data(contentsOf: meta),
-                   let dict = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any],
-                   let identifier = dict["MCMMetadataIdentifier"] as? String {
-                    maps.dataContainers[identifier] = dir
-                    maps.dataContainers[identifier.lowercased()] = dir
-                    let clean = cleanIdentifier(identifier)
-                    maps.dataContainers[clean] = dir
-                    maps.dataContainers[clean.lowercased()] = dir
+        let dataRoots = [
+            URL(fileURLWithPath: "/var/mobile/Containers/Data/Application"),
+            URL(fileURLWithPath: "/var/mobile/Containers/Data/Internal/Application"),
+            URL(fileURLWithPath: "/var/mobile/Containers/Data/System")
+        ]
+        for dataRoot in dataRoots {
+            if let dataUUIDs = try? fileManager.contentsOfDirectory(at: dataRoot, includingPropertiesForKeys: nil) {
+                for dir in dataUUIDs {
+                    let meta = dir.appendingPathComponent(".com.apple.mobile_container_manager.metadata.plist")
+                    if let data = try? Data(contentsOf: meta),
+                       let dict = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any] {
+                        let identifier = (dict["MCMMetadataIdentifier"] as? String) ??
+                                         (dict["MCMMetadataBundleID"] as? String) ??
+                                         (dict["CFBundleIdentifier"] as? String)
+                        if let identifier = identifier {
+                            maps.dataContainers[identifier] = dir
+                            maps.dataContainers[identifier.lowercased()] = dir
+                            let clean = cleanIdentifier(identifier)
+                            maps.dataContainers[clean] = dir
+                            maps.dataContainers[clean.lowercased()] = dir
+                        }
+                    } else {
+                        let containerPlist = dir.appendingPathComponent("Container.plist")
+                        if let cData = try? Data(contentsOf: containerPlist),
+                           let cDict = try? PropertyListSerialization.propertyList(from: cData, format: nil) as? [String: Any],
+                           let cId = (cDict["MCMMetadataIdentifier"] as? String) ?? (cDict["CFBundleIdentifier"] as? String) {
+                            maps.dataContainers[cId] = dir
+                            maps.dataContainers[cId.lowercased()] = dir
+                        }
+                    }
                 }
             }
         }
@@ -99,7 +151,9 @@ public final class AppDiscoveryService {
                     let meta = dir.appendingPathComponent(".com.apple.mobile_container_manager.metadata.plist")
                     if let data = try? Data(contentsOf: meta),
                        let dict = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any],
-                       let identifier = dict["MCMMetadataIdentifier"] as? String {
+                       let identifier = (dict["MCMMetadataIdentifier"] as? String) ??
+                                        (dict["MCMMetadataBundleID"] as? String) ??
+                                        (dict["CFBundleIdentifier"] as? String) {
                         maps.bundleContainers[identifier] = appBundle
                         maps.bundleContainers[identifier.lowercased()] = appBundle
                         let clean = cleanIdentifier(identifier)
@@ -129,7 +183,9 @@ public final class AppDiscoveryService {
                 let meta = dir.appendingPathComponent(".com.apple.mobile_container_manager.metadata.plist")
                 if let data = try? Data(contentsOf: meta),
                    let dict = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any],
-                   let identifier = dict["MCMMetadataIdentifier"] as? String {
+                   let identifier = (dict["MCMMetadataIdentifier"] as? String) ??
+                                    (dict["MCMMetadataBundleID"] as? String) ??
+                                    (dict["CFBundleIdentifier"] as? String) {
                     maps.groupContainers[identifier] = dir
                     maps.groupContainers[identifier.lowercased()] = dir
                     let clean = cleanIdentifier(identifier)
@@ -176,17 +232,17 @@ public final class AppDiscoveryService {
         // 1. Exact match
         if cleanGroup == cleanBundle { return true }
 
-        // 2. Group is sub-group of bundle: e.g. "net.whatsapp.whatsapp.shared" hasPrefix "net.whatsapp.whatsapp"
-        if cleanGroup.hasPrefix(cleanBundle + ".") || cleanGroup.hasPrefix(cleanBundle + "_") {
+        // 2. Group is sub-group of bundle or contains bundle
+        if cleanGroup.hasPrefix(cleanBundle + ".") || cleanGroup.hasPrefix(cleanBundle + "_") || cleanGroup.contains(cleanBundle) {
             return true
         }
 
-        // 3. Bundle hasPrefix group: e.g. cleanGroup is "net.whatsapp" and cleanBundle is "net.whatsapp.whatsapp"
-        if cleanBundle.hasPrefix(cleanGroup + ".") {
+        // 3. Bundle hasPrefix group or contains group
+        if cleanBundle.hasPrefix(cleanGroup + ".") || cleanBundle.contains(cleanGroup) {
             return true
         }
 
-        // 4. Common root domain matching
+        // 4. Common root domain & company matching
         let groupParts = cleanGroup.components(separatedBy: ".")
         let bundleParts = cleanBundle.components(separatedBy: ".")
         if groupParts.count >= 2 && bundleParts.count >= 2 {
@@ -195,9 +251,9 @@ public final class AppDiscoveryService {
                 if groupParts[0] == bundleParts[0] {
                     return true
                 }
-            } else if groupParts.count >= 3 && bundleParts.count >= 3 {
-                // e.g. com.google.chrome vs com.google.common
-                if groupParts[0] == bundleParts[0] && groupParts[1] == bundleParts[1] && groupParts[2] == bundleParts[2] {
+            } else if groupParts[0] == bundleParts[0] && groupParts[1] == bundleParts[1] {
+                // Same top domain and company (e.g. net.whatsapp or com.burbn)
+                if !genericDomains.contains(groupParts[1]) {
                     return true
                 }
             }
@@ -310,12 +366,19 @@ public final class AppDiscoveryService {
             let buildVersion = stringProperty(proxy, selectorName: "bundleVersion") ?? "1"
 
             // URLs with filesystem metadata fallback (case-insensitive & clean bundleID support)
-            let bundleURL = urlProperty(proxy, selectorName: "bundleURL") ??
+            var bundleURL = urlProperty(proxy, selectorName: "bundleURL") ??
                             containerMaps.bundleContainers[bundleID] ??
                             containerMaps.bundleContainers[bundleID.lowercased()] ??
                             containerMaps.bundleContainers[cleanIdentifier(bundleID).lowercased()]
+            if bundleURL == nil, let bCont = urlProperty(proxy, selectorName: "bundleContainerURL") {
+                if let subs = try? fileManager.contentsOfDirectory(at: bCont, includingPropertiesForKeys: nil),
+                   let appDir = subs.first(where: { $0.pathExtension == "app" }) {
+                    bundleURL = appDir
+                }
+            }
 
             let dataContainerURL = urlProperty(proxy, selectorName: "dataContainerURL") ??
+                                   urlProperty(proxy, selectorName: "containerURL") ??
                                    containerMaps.dataContainers[bundleID] ??
                                    containerMaps.dataContainers[bundleID.lowercased()] ??
                                    containerMaps.dataContainers[cleanIdentifier(bundleID).lowercased()]
@@ -333,6 +396,7 @@ public final class AppDiscoveryService {
             let appType = stringProperty(proxy, selectorName: "applicationType") ?? "User"
             let isSystem = (appType.caseInsensitiveCompare("System") == .orderedSame)
 
+            let cachedSizes = getCachedAppSizes(for: bundleID)
             let app = InstalledApp(
                 bundleIdentifier: bundleID,
                 name: displayName,
@@ -341,7 +405,10 @@ public final class AppDiscoveryService {
                 bundleURL: bundleURL,
                 dataContainerURL: dataContainerURL,
                 groupContainerURLs: groupContainerURLs,
-                isSystemApp: isSystem
+                isSystemApp: isSystem,
+                appSizeBytes: cachedSizes?.appSize ?? 0,
+                dataSizeBytes: cachedSizes?.dataSize ?? 0,
+                groupSizeBytes: cachedSizes?.groupSize ?? 0
             )
             results.append(app)
         }
@@ -387,6 +454,7 @@ public final class AppDiscoveryService {
                     containerMaps: containerMaps
                 )
 
+                let cachedSizes = getCachedAppSizes(for: bundleID)
                 results[bundleID] = InstalledApp(
                     bundleIdentifier: bundleID,
                     name: appName,
@@ -395,7 +463,10 @@ public final class AppDiscoveryService {
                     bundleURL: appBundle,
                     dataContainerURL: dataURL,
                     groupContainerURLs: groups,
-                    isSystemApp: false
+                    isSystemApp: false,
+                    appSizeBytes: cachedSizes?.appSize ?? 0,
+                    dataSizeBytes: cachedSizes?.dataSize ?? 0,
+                    groupSizeBytes: cachedSizes?.groupSize ?? 0
                 )
             }
         }
@@ -404,7 +475,17 @@ public final class AppDiscoveryService {
     }
 
     // MARK: - Disk Size Calculations
-    public func calculateAppSizes(for app: InstalledApp) -> (appSize: Int64, dataSize: Int64, groupSize: Int64) {
+    public func calculateAppSizes(for app: InstalledApp, forceRefresh: Bool = false) -> (appSize: Int64, dataSize: Int64, groupSize: Int64) {
+        if !forceRefresh {
+            sizeCacheLock.lock()
+            if let cached = appSizeCache[app.bundleIdentifier],
+               Date().timeIntervalSince(cached.timestamp) < sizeCacheTTL {
+                sizeCacheLock.unlock()
+                return (cached.appSize, cached.dataSize, cached.groupSize)
+            }
+            sizeCacheLock.unlock()
+        }
+
         var appSize: Int64 = 0
         var dataSize: Int64 = 0
         var groupSize: Int64 = 0
@@ -421,27 +502,54 @@ public final class AppDiscoveryService {
             groupSize += directorySize(at: groupURL)
         }
 
+        sizeCacheLock.lock()
+        appSizeCache[app.bundleIdentifier] = AppSizeCacheEntry(
+            appSize: appSize,
+            dataSize: dataSize,
+            groupSize: groupSize,
+            timestamp: Date()
+        )
+        sizeCacheLock.unlock()
+
         return (appSize, dataSize, groupSize)
     }
 
     public func directorySize(at url: URL) -> Int64 {
-        var size: Int64 = 0
-        guard let enumerator = fileManager.enumerator(at: url, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles, .skipsPackageDescendants]) else {
+        return directorySize(atPath: url.path)
+    }
+
+    public func directorySize(atPath path: String) -> Int64 {
+        guard !path.isEmpty else { return 0 }
+        var rootSt = stat()
+        guard lstat(path, &rootSt) == 0 else { return 0 }
+        let rootMode = rootSt.st_mode & S_IFMT
+        if rootMode == S_IFREG {
+            return Int64(rootSt.st_size)
+        }
+        guard rootMode == S_IFDIR else { return 0 }
+
+        var totalSize: Int64 = 0
+        guard let enumerator = fileManager.enumerator(atPath: path) else {
             return 0
         }
 
-        for case let fileURL as URL in enumerator {
+        while let subpath = enumerator.nextObject() as? String {
+            let fullPath = (path as NSString).appendingPathComponent(subpath)
             var st = stat()
-            // Use lstat to avoid following symlinks into loops or opening sockets/FIFOs
-            guard lstat(fileURL.path, &st) == 0 else { continue }
+            guard lstat(fullPath, &st) == 0 else { continue }
             let fileType = st.st_mode & S_IFMT
 
+            // Do not follow symlinks to avoid circular recursion or counting files outside container
+            if fileType == S_IFLNK {
+                continue
+            }
+
             if fileType == S_IFREG {
-                size += Int64(st.st_size)
+                totalSize += Int64(st.st_size)
             }
         }
 
-        return size
+        return totalSize
     }
 
     // MARK: - Reflection Helpers
