@@ -96,6 +96,11 @@ public final class GoogleDriveService: NSObject, ObservableObject, ASWebAuthenti
             UserDefaults.standard.set(customClientSecret, forKey: "gdrive_client_secret")
         }
     }
+    @Published public var targetFolderName: String {
+        didSet {
+            UserDefaults.standard.set(targetFolderName, forKey: "gdrive_target_folder_name")
+        }
+    }
 
     // In-memory caching with Keychain backed persistent storage
     private var _cachedAccessToken: String?
@@ -150,6 +155,8 @@ public final class GoogleDriveService: NSObject, ObservableObject, ASWebAuthenti
             self.customClientId = savedClientId
         }
         self.customClientSecret = UserDefaults.standard.string(forKey: "gdrive_client_secret") ?? ""
+        let savedFolder = UserDefaults.standard.string(forKey: "gdrive_target_folder_name") ?? "AppVault Backups"
+        self.targetFolderName = savedFolder.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "AppVault Backups" : savedFolder
 
         super.init()
 
@@ -421,14 +428,38 @@ public final class GoogleDriveService: NSObject, ObservableObject, ASWebAuthenti
         }
     }
 
-    // MARK: - Get or Create "AppVault Backups" Folder in Google Drive
+    // MARK: - Get or Create Target Folder in Google Drive (Supports nested paths like Backups/iOS)
     public func getOrCreateAppFolder() async throws -> String {
         let token = try await ensureValidToken()
+        let cleanPath = targetFolderName.trimmingCharacters(in: .whitespacesAndNewlines)
+        let effectivePath = cleanPath.isEmpty ? "AppVault Backups" : cleanPath
+
+        let segments = effectivePath.components(separatedBy: "/").map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
+        guard !segments.isEmpty else {
+            return try await getOrCreateSingleFolder(named: "AppVault Backups", parentId: nil, token: token)
+        }
+
+        var currentParentId: String? = nil
+        for segment in segments {
+            currentParentId = try await getOrCreateSingleFolder(named: segment, parentId: currentParentId, token: token)
+        }
+        return currentParentId ?? "root"
+    }
+
+    private func getOrCreateSingleFolder(named name: String, parentId: String?, token: String) async throws -> String {
+        let escapedName = name.replacingOccurrences(of: "'", with: "\\'")
+        var query = "name = '\(escapedName)' and mimeType = 'application/vnd.google-apps.folder' and trashed = false"
+        if let parent = parentId {
+            query += " and '\(parent)' in parents"
+        } else {
+            query += " and 'root' in parents"
+        }
 
         var components = URLComponents(string: "https://www.googleapis.com/drive/v3/files")!
         components.queryItems = [
-            URLQueryItem(name: "q", value: "name = 'AppVault Backups' and mimeType = 'application/vnd.google-apps.folder' and trashed = false"),
-            URLQueryItem(name: "fields", value: "files(id,name)")
+            URLQueryItem(name: "q", value: query),
+            URLQueryItem(name: "fields", value: "files(id,name)"),
+            URLQueryItem(name: "spaces", value: "drive")
         ]
 
         guard let listURL = components.url else {
@@ -456,17 +487,22 @@ public final class GoogleDriveService: NSObject, ObservableObject, ASWebAuthenti
         createReq.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         createReq.setValue("application/json; charset=UTF-8", forHTTPHeaderField: "Content-Type")
 
-        let metadata: [String: Any] = [
-            "name": "AppVault Backups",
+        var metadata: [String: Any] = [
+            "name": name,
             "mimeType": "application/vnd.google-apps.folder"
         ]
+        if let parent = parentId {
+            metadata["parents"] = [parent]
+        }
+
         createReq.httpBody = try JSONSerialization.data(withJSONObject: metadata)
 
         let (createData, res) = try await URLSession.shared.data(for: createReq)
         guard let http = res as? HTTPURLResponse, (http.statusCode == 200 || http.statusCode == 201),
               let createJson = try? JSONSerialization.jsonObject(with: createData) as? [String: Any],
               let newId = createJson["id"] as? String else {
-            throw NSError(domain: "GoogleDrive", code: 500, userInfo: [NSLocalizedDescriptionKey: "Failed to create folder in Google Drive."])
+            let errString = String(data: createData, encoding: .utf8) ?? "Unknown error"
+            throw NSError(domain: "GoogleDrive", code: 500, userInfo: [NSLocalizedDescriptionKey: "Failed to create folder '\(name)': \(errString)"])
         }
 
         return newId

@@ -14,10 +14,10 @@ on:
         type: boolean
         default: true
       release_tag:
-        description: 'Release Tag (defaults to v2.1.7)'
+        description: 'Release Tag (defaults to v2.1.8)'
         required: false
         type: string
-        default: 'v2.1.7'
+        default: 'v2.1.8'
 
 permissions:
   contents: write
@@ -86,26 +86,27 @@ jobs:
         if: ${{ github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && github.event.inputs.upload_release == 'true') }}
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ github.event.inputs.release_tag || 'v2.1.7' }}
-          name: "AppVault ${{ github.event.inputs.release_tag || 'v2.1.7' }}"
+          tag_name: ${{ github.event.inputs.release_tag || 'v2.1.8' }}
+          name: "AppVault ${{ github.event.inputs.release_tag || 'v2.1.8' }}"
           body: |
-            ## AppVault v2.1.7 - Native Rclone & Token-Free Google Drive Integration
+            ## AppVault v2.1.8 - Customizable Cloud Folders & Native Rclone Integration
 
             AppVault is an unsandboxed application for **TrollStore** and **jailbroken** iOS devices (iOS 15.0 - 17.0+).
 
-            ### Highlights & Features in v2.1.7:
-            1. 🔄 **Native Rclone Google Drive Auto-Import**:
+            ### Highlights & Features in v2.1.8:
+            1. 📁 **Customizable Google Drive Folder & Nested Subpaths**:
+               - Choose any folder in Google Drive (e.g. `Backups`, `MyBackups`, or nested paths like `Backups/iPhone14`).
+               - Hierarchical folder traversal: automatically checks for existing folders and creates non-existing folders on the fly.
+               - Cloud backups list and direct stream uploads dynamically resolve to your designated cloud folder.
+            2. 🔄 **Native Rclone Google Drive Auto-Import**:
                - Automatically detects `rclone.conf` on jailbroken/rootless iOS (`/var/mobile/.config/rclone/rclone.conf`, etc.).
-               - Allows 1-tap connection to any existing Google Drive remote with zero manual OAuth setup, client IDs, or browser redirects.
-               - Includes built-in fallback OAuth credentials matching rclone defaults so automated background token renewals succeed seamlessly.
-            2. 🌐 **Local Rclone WebDAV Bridge Daemon**:
-               - Seamlessly start and stop local `rclone serve webdav <remote>: --addr 127.0.0.1:8085 --no-auth` directly within the app using POSIX daemon spawning.
-               - Anonymous local WebDAV support: connect AppVault to `http://127.0.0.1:8085/` with zero passwords needed.
-            3. 📋 **In-App Rclone Config Importer**:
+               - 1-tap connection to any existing Google Drive remote with zero manual OAuth setup, client IDs, or browser redirects.
+               - Built-in fallback OAuth credentials matching rclone defaults so automated background token renewals succeed seamlessly.
+            3. 🌐 **Local Rclone WebDAV Bridge Daemon & Subfolders**:
+               - Start/stop local `rclone serve webdav` directly within the app on `127.0.0.1:8085`.
+               - Customizable bridge subfolders to scope WebDAV backups to specific directories.
+            4. 📋 **In-App Rclone Config Importer**:
                - Dedicated modal sheet to paste or import `rclone.conf` from clipboard or file, instantly parsing all remotes.
-            4. 🚀 **All Previous High-Performance Enhancements**:
-               - Continuous 6-worker sliding-window sizing pipeline for 200+ apps.
-               - Native iOS document picker export sheet with iPad popover compatibility.
 
             ### Installation:
             - **TrollStore**: Download `AppVault.tipa` (or `AppVault.ipa`) and open in TrollStore.

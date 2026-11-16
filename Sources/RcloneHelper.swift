@@ -42,6 +42,7 @@ public final class RcloneHelper: ObservableObject {
     @Published public var isBridgeRunning: Bool = false
     @Published public var activeBridgePort: Int = 8085
     @Published public var selectedRemoteName: String = ""
+    @Published public var targetFolder: String = ""
     @Published public var statusMessage: String? = nil
 
     private var bridgePid: pid_t? = nil
@@ -204,8 +205,10 @@ public final class RcloneHelper: ObservableObject {
             return false
         }
 
-        // Clean remote name (ensure it ends with colon if not present)
-        let formattedRemote = targetRemote.hasSuffix(":") ? targetRemote : "\(targetRemote):"
+        // Format remote and optional subfolder (e.g. "gdrive:Backups" or "gdrive:")
+        let baseRemote = targetRemote.hasSuffix(":") ? String(targetRemote.dropLast()) : targetRemote
+        let cleanSubfolder = targetFolder.trimmingCharacters(in: CharacterSet(charactersIn: "/ "))
+        let formattedRemote = cleanSubfolder.isEmpty ? "\(baseRemote):" : "\(baseRemote):\(cleanSubfolder)"
 
         // Terminate any previous instance
         stopWebDAVBridge()

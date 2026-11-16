@@ -61,12 +61,26 @@ public struct SettingsView: View {
                         }
                         .padding(.vertical, 4)
 
-                        HStack {
-                            Label("Target Cloud Folder", systemImage: "folder.badge.gearshape")
-                            Spacer()
-                            Text("AppVault Backups")
+                        VStack(alignment: .leading, spacing: 6) {
+                            HStack {
+                                Label("Target Cloud Folder / Path", systemImage: "folder.badge.gearshape")
+                                    .font(.subheadline)
+                                Spacer()
+                            }
+
+                            TextField("e.g. AppVault Backups or Backups/iOS", text: $googleDrive.targetFolderName)
+                                .font(.system(size: 13, design: .monospaced))
+                                .autocapitalization(.none)
+                                .disableAutocorrection(true)
+                                .padding(8)
+                                .background(Color(UIColor.secondarySystemBackground))
+                                .cornerRadius(6)
+
+                            Text("Any folder name or nested path. Folders will be created automatically in your Google Drive if they don't exist.")
+                                .font(.caption2)
                                 .foregroundColor(.secondary)
                         }
+                        .padding(.vertical, 4)
 
                         Button(action: { googleDrive.signOut() }) {
                             Text("Disconnect Google Drive")
@@ -111,6 +125,20 @@ public struct SettingsView: View {
                                 }
 
                                 TextField("xxxxxx.apps.googleusercontent.com", text: $googleDrive.customClientId)
+                                    .font(.system(size: 13, design: .monospaced))
+                                    .autocapitalization(.none)
+                                    .disableAutocorrection(true)
+                                    .padding(8)
+                                    .background(Color(UIColor.secondarySystemBackground))
+                                    .cornerRadius(6)
+                            }
+
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text("Target Cloud Folder / Path (Optional)")
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+
+                                TextField("e.g. AppVault Backups or Backups/iOS", text: $googleDrive.targetFolderName)
                                     .font(.system(size: 13, design: .monospaced))
                                     .autocapitalization(.none)
                                     .disableAutocorrection(true)
@@ -295,6 +323,22 @@ public struct SettingsView: View {
                             .padding(.vertical, 4)
                         }
 
+                        if rclone.isRcloneBinaryPresent {
+                            HStack {
+                                Text("Bridge Subfolder:")
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                                TextField("Optional (e.g. Backups)", text: $rclone.targetFolder)
+                                    .font(.system(size: 12, design: .monospaced))
+                                    .autocapitalization(.none)
+                                    .disableAutocorrection(true)
+                                    .padding(4)
+                                    .background(Color(UIColor.secondarySystemBackground))
+                                    .cornerRadius(4)
+                            }
+                            .padding(.vertical, 2)
+                        }
+
                         HStack {
                             Button(action: {
                                 rclone.scanEnvironment()
@@ -434,7 +478,7 @@ public struct SettingsView: View {
                     HStack {
                         Text("App Version")
                         Spacer()
-                        Text("2.1.7 (Rclone & Native Cloud)")
+                        Text("2.1.8 (Rclone & Custom Cloud Folder)")
                             .foregroundColor(.secondary)
                     }
 
