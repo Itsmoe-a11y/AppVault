@@ -286,9 +286,12 @@ public final class GoogleDriveService: NSObject, ObservableObject, ASWebAuthenti
             bodyParams["client_secret"] = clientSecret
         }
 
+        var allowed = CharacterSet.alphanumerics
+        allowed.insert(charactersIn: "-._~")
+
         let bodyString = bodyParams.compactMap { key, value in
-            guard let encKey = key.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed),
-                  let encVal = value.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) else { return nil }
+            guard let encKey = key.addingPercentEncoding(withAllowedCharacters: allowed),
+                  let encVal = value.addingPercentEncoding(withAllowedCharacters: allowed) else { return nil }
             return "\(encKey)=\(encVal)"
         }.joined(separator: "&")
 
@@ -351,9 +354,12 @@ public final class GoogleDriveService: NSObject, ObservableObject, ASWebAuthenti
             bodyParams["client_secret"] = clientSecret
         }
 
+        var allowed = CharacterSet.alphanumerics
+        allowed.insert(charactersIn: "-._~")
+
         let bodyString = bodyParams.compactMap { key, value in
-            guard let encKey = key.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed),
-                  let encVal = value.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) else { return nil }
+            guard let encKey = key.addingPercentEncoding(withAllowedCharacters: allowed),
+                  let encVal = value.addingPercentEncoding(withAllowedCharacters: allowed) else { return nil }
             return "\(encKey)=\(encVal)"
         }.joined(separator: "&")
 
@@ -403,6 +409,16 @@ public final class GoogleDriveService: NSObject, ObservableObject, ASWebAuthenti
         isAuthenticated = false
         UserDefaults.standard.removeObject(forKey: "gdrive_user_email")
         UserDefaults.standard.removeObject(forKey: "gdrive_user_name")
+    }
+
+    public func setDirectTokens(accessToken: String?, refreshToken: String) {
+        self.accessToken = accessToken
+        self.refreshToken = refreshToken
+        self.tokenExpiry = Date().addingTimeInterval(3500)
+        self.isAuthenticated = true
+        Task {
+            await self.fetchUserProfile()
+        }
     }
 
     // MARK: - Get or Create "AppVault Backups" Folder in Google Drive

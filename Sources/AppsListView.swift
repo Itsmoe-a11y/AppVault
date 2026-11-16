@@ -222,7 +222,11 @@ struct AppRowView: View {
                     }
 
                     if totalData == 0 && app.appSizeBytes == 0 {
-                        if isScanning {
+                        if app.isSized {
+                            Text("\u{2022} 0 KB")
+                                .font(.system(size: 11))
+                                .foregroundColor(.secondary)
+                        } else if isScanning {
                             Text("\u{2022} Calculating...")
                                 .font(.system(size: 11))
                                 .foregroundColor(.secondary)

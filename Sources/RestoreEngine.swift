@@ -9,6 +9,22 @@ public final class RestoreEngine {
 
     private init() {}
 
+    // MARK: - Safe Directory Content Replacement (Preserves System Directory ACLs & Attributes)
+    private func replaceDirectoryContents(from sourceDir: URL, to destinationDir: URL) {
+        try? fileManager.createDirectory(at: destinationDir, withIntermediateDirectories: true)
+        if let existing = try? fileManager.contentsOfDirectory(at: destinationDir, includingPropertiesForKeys: nil) {
+            for item in existing {
+                try? fileManager.removeItem(at: item)
+            }
+        }
+        if let incoming = try? fileManager.contentsOfDirectory(at: sourceDir, includingPropertiesForKeys: nil) {
+            for item in incoming {
+                let target = destinationDir.appendingPathComponent(item.lastPathComponent)
+                try? fileManager.copyItem(at: item, to: target)
+            }
+        }
+    }
+
     // MARK: - Fast Metadata Extractor (Zero Full Extraction Overhead)
     public func extractMetadata(from archiveURL: URL) -> BackupRecord? {
         guard fileManager.fileExists(atPath: archiveURL.path) else { return nil }
@@ -262,7 +278,7 @@ public final class RestoreEngine {
             )
         }
 
-        // MARK: 2. Terminate Running Application
+        // MARK: 2. Terminate Running Application & Daemons
         progress(OperationProgress(
             stage: "Terminating App",
             fractionCompleted: 0.40,
@@ -271,6 +287,8 @@ public final class RestoreEngine {
 
         PosixHelper.shared.terminateApp(named: record.appName)
         PosixHelper.shared.terminateApp(named: record.bundleIdentifier)
+        // Terminate preferences daemon so restored preferences aren't overwritten from memory
+        PosixHelper.shared.terminateApp(named: "cfprefsd")
 
         // MARK: 3. Locate Target Application on Device
         progress(OperationProgress(
@@ -280,7 +298,10 @@ public final class RestoreEngine {
         ))
 
         let installedApps = AppDiscoveryService.shared.fetchInstalledApps()
-        let targetApp = installedApps.first(where: { $0.bundleIdentifier == record.bundleIdentifier })
+        let targetApp = installedApps.first(where: {
+            $0.bundleIdentifier == record.bundleIdentifier ||
+            $0.bundleIdentifier.caseInsensitiveCompare(record.bundleIdentifier) == .orderedSame
+        })
 
         // Check if app bundle needs to be installed first via TrollStore
         if targetApp == nil {
@@ -329,8 +350,7 @@ public final class RestoreEngine {
                 let src = backupDataDir.appendingPathComponent("Documents")
                 if fileManager.fileExists(atPath: src.path) {
                     let dest = dataContainer.appendingPathComponent("Documents")
-                    try? fileManager.removeItem(at: dest)
-                    try? fileManager.copyItem(at: src, to: dest)
+                    replaceDirectoryContents(from: src, to: dest)
                 }
             }
 
@@ -344,8 +364,7 @@ public final class RestoreEngine {
                     let srcPref = srcLib.appendingPathComponent("Preferences")
                     if fileManager.fileExists(atPath: srcPref.path) {
                         let destPref = destLib.appendingPathComponent("Preferences")
-                        try? fileManager.removeItem(at: destPref)
-                        try? fileManager.copyItem(at: srcPref, to: destPref)
+                        replaceDirectoryContents(from: srcPref, to: destPref)
                     }
                 }
 
@@ -353,8 +372,7 @@ public final class RestoreEngine {
                     let srcAS = srcLib.appendingPathComponent("Application Support")
                     if fileManager.fileExists(atPath: srcAS.path) {
                         let destAS = destLib.appendingPathComponent("Application Support")
-                        try? fileManager.removeItem(at: destAS)
-                        try? fileManager.copyItem(at: srcAS, to: destAS)
+                        replaceDirectoryContents(from: srcAS, to: destAS)
                     }
                 }
 
@@ -362,8 +380,7 @@ public final class RestoreEngine {
                     let srcCaches = srcLib.appendingPathComponent("Caches")
                     if fileManager.fileExists(atPath: srcCaches.path) {
                         let destCaches = destLib.appendingPathComponent("Caches")
-                        try? fileManager.removeItem(at: destCaches)
-                        try? fileManager.copyItem(at: srcCaches, to: destCaches)
+                        replaceDirectoryContents(from: srcCaches, to: destCaches)
                     }
                 }
             }
@@ -372,8 +389,7 @@ public final class RestoreEngine {
             let srcSystemData = backupDataDir.appendingPathComponent("SystemData")
             if fileManager.fileExists(atPath: srcSystemData.path) {
                 let destSystemData = dataContainer.appendingPathComponent("SystemData")
-                try? fileManager.removeItem(at: destSystemData)
-                try? fileManager.copyItem(at: srcSystemData, to: destSystemData)
+                replaceDirectoryContents(from: srcSystemData, to: destSystemData)
             }
 
             // Recursively repair permissions (mobile:mobile 501:501, dirs 0755, files 0644/0755)
@@ -394,12 +410,18 @@ public final class RestoreEngine {
                     let backupGroup = backupGroupsDir.appendingPathComponent(groupID)
                     guard fileManager.fileExists(atPath: backupGroup.path) else { continue }
 
-                    for sub in ["Documents", "Library"] {
-                        let src = backupGroup.appendingPathComponent(sub)
-                        guard fileManager.fileExists(atPath: src.path) else { continue }
-                        let dest = currentGroupURL.appendingPathComponent(sub)
-                        try? fileManager.removeItem(at: dest)
-                        try? fileManager.copyItem(at: src, to: dest)
+                    // Restore ALL files and subdirectories in the AppGroup (e.g. ChatStorage.sqlite, Message, Media, etc.)
+                    if let incoming = try? fileManager.contentsOfDirectory(at: backupGroup, includingPropertiesForKeys: nil) {
+                        for item in incoming {
+                            let dest = currentGroupURL.appendingPathComponent(item.lastPathComponent)
+                            let isDir = (try? item.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) ?? false
+                            if isDir {
+                                replaceDirectoryContents(from: item, to: dest)
+                            } else {
+                                try? fileManager.removeItem(at: dest)
+                                try? fileManager.copyItem(at: item, to: dest)
+                            }
+                        }
                     }
 
                     // Recursively repair permissions on shared group container

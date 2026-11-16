@@ -2,7 +2,34 @@ import SwiftUI
 import UIKit
 import UniformTypeIdentifiers
 
-// MARK: - Share Sheet Bridge
+// MARK: - Safe UIKit Share Sheet Presenter (Crash-Proof on iOS 16 & iPad)
+@MainActor
+public func presentShareSheet(url: URL) {
+    guard FileManager.default.fileExists(atPath: url.path) else { return }
+
+    guard let windowScene = UIApplication.shared.connectedScenes.first(where: { $0.activationState == .foregroundActive }) as? UIWindowScene ??
+                            UIApplication.shared.connectedScenes.first as? UIWindowScene,
+          let rootVC = windowScene.windows.first(where: { $0.isKeyWindow })?.rootViewController ??
+                       windowScene.windows.first?.rootViewController else {
+        return
+    }
+
+    var topVC = rootVC
+    while let presented = topVC.presentedViewController, !presented.isBeingDismissed {
+        topVC = presented
+    }
+
+    let controller = UIActivityViewController(activityItems: [url], applicationActivities: nil)
+    if let popover = controller.popoverPresentationController {
+        popover.sourceView = topVC.view
+        popover.sourceRect = CGRect(x: topVC.view.bounds.midX, y: topVC.view.bounds.midY, width: 0, height: 0)
+        popover.permittedArrowDirections = []
+    }
+
+    topVC.present(controller, animated: true)
+}
+
+// MARK: - Share Sheet Bridge (Backwards Compatibility)
 public struct ShareSheet: UIViewControllerRepresentable {
     public let activityItems: [Any]
     public let applicationActivities: [UIActivity]?

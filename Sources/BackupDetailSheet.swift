@@ -301,6 +301,7 @@ public struct BackupDetailSheet: View {
                             currentApp.appSizeBytes = sizes.appSize
                             currentApp.dataSizeBytes = sizes.dataSize
                             currentApp.groupSizeBytes = sizes.groupSize
+                            currentApp.isSized = true
                         }
                     }
                 }

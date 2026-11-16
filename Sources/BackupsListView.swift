@@ -88,15 +88,9 @@ public struct BackupsListView: View {
                     backupsVM.importArchive(from: url)
                 }
             }
-            .sheet(item: Binding<URLItem?>(
-                get: { backupsVM.exportURL.map { URLItem(url: $0) } },
-                set: { backupsVM.exportURL = $0?.url }
-            )) { item in
-                ShareSheet(activityItems: [item.url])
-            }
             .sheet(item: $backupsVM.restoreConfirmationRecord) { record in
-                SelectiveRestoreSheet(record: record) { options in
-                    backupsVM.startRestore(record: record, options: options)
+                SelectiveRestoreSheet(record: record) {
+                    backupsVM.refreshLocalBackups()
                 }
             }
             .sheet(item: $backupsVM.renameTargetRecord) { target in
@@ -182,7 +176,8 @@ public struct BackupsListView: View {
                                 backupsVM.restoreConfirmationRecord = record
                             },
                             onShare: {
-                                backupsVM.exportURL = backupsVM.fileURL(for: record)
+                                let url = backupsVM.fileURL(for: record)
+                                presentShareSheet(url: url)
                             },
                             onRename: {
                                 backupsVM.renameTargetRecord = record

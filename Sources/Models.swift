@@ -48,6 +48,7 @@ public struct InstalledApp: Identifiable, Hashable {
     public var appSizeBytes: Int64
     public var dataSizeBytes: Int64
     public var groupSizeBytes: Int64
+    public var isSized: Bool
 
     public var totalSizeBytes: Int64 {
         appSizeBytes + dataSizeBytes + groupSizeBytes
@@ -64,7 +65,8 @@ public struct InstalledApp: Identifiable, Hashable {
         isSystemApp: Bool = false,
         appSizeBytes: Int64 = 0,
         dataSizeBytes: Int64 = 0,
-        groupSizeBytes: Int64 = 0
+        groupSizeBytes: Int64 = 0,
+        isSized: Bool = false
     ) {
         self.bundleIdentifier = bundleIdentifier
         self.name = name.isEmpty ? bundleIdentifier : name
@@ -77,6 +79,7 @@ public struct InstalledApp: Identifiable, Hashable {
         self.appSizeBytes = appSizeBytes
         self.dataSizeBytes = dataSizeBytes
         self.groupSizeBytes = groupSizeBytes
+        self.isSized = isSized || (appSizeBytes > 0 || dataSizeBytes > 0 || groupSizeBytes > 0)
     }
 
     public func hash(into hasher: inout Hasher) {

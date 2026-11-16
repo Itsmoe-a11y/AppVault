@@ -593,6 +593,7 @@ final class TarExtractor {
         // Regular file ('0' or '\0')
         let parentURL = destURL.deletingLastPathComponent()
         try fileManager.createDirectory(at: parentURL, withIntermediateDirectories: true)
+        try? fileManager.removeItem(at: destURL)
         unlink(destPath)
         fileManager.createFile(atPath: destPath, contents: nil, attributes: nil)
 
@@ -711,11 +712,8 @@ public final class StreamingArchiveEngine {
             for (groupID, groupURL) in app.groupContainerURLs {
                 guard fileManager.fileExists(atPath: groupURL.path) else { continue }
                 savedGroups.append(groupID)
-                for sub in ["Documents", "Library"] {
-                    let subURL = groupURL.appendingPathComponent(sub)
-                    guard fileManager.fileExists(atPath: subURL.path) else { continue }
-                    collectItems(rootURL: subURL, baseArchivePath: "AppGroups/\(groupID)/\(sub)", includeCaches: includeCaches, into: &items, totalBytes: &totalBytesToProcess)
-                }
+                // Collect entire AppGroup directory (root databases, Message, Media, Documents, Library, etc.)
+                collectItems(rootURL: groupURL, baseArchivePath: "AppGroups/\(groupID)", includeCaches: includeCaches, into: &items, totalBytes: &totalBytesToProcess)
             }
         }
 
@@ -891,7 +889,7 @@ public final class StreamingArchiveEngine {
         ))
 
         let resourceKeys: [URLResourceKey] = [.isDirectoryKey, .isRegularFileKey, .fileSizeKey, .isSymbolicLinkKey]
-        guard let enumerator = fileManager.enumerator(at: rootURL, includingPropertiesForKeys: resourceKeys, options: [.skipsPackageDescendants]) else {
+        guard let enumerator = fileManager.enumerator(at: rootURL, includingPropertiesForKeys: resourceKeys, options: []) else {
             return
         }
 

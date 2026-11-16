@@ -7,6 +7,7 @@ public struct SettingsView: View {
     @ObservedObject var webdav = WebDAVService.shared
     @State private var showAdvancedOAuth = false
     @State private var showGoogleGuide = false
+    @State private var directTokenInput = ""
 
     public init() {}
 
@@ -144,18 +145,44 @@ public struct SettingsView: View {
                     }
 
                     DisclosureGroup("Advanced OAuth Settings (Optional)", isExpanded: $showAdvancedOAuth) {
-                        VStack(alignment: .leading, spacing: 8) {
-                            Text("Client Secret is optional for iOS PKCE clients. Only provide if you created a Web Application client.")
+                        VStack(alignment: .leading, spacing: 10) {
+                            Text("Client Secret (Optional for iOS PKCE):")
                                 .font(.caption2)
                                 .foregroundColor(.secondary)
 
-                            SecureField("Client Secret (Optional)", text: $googleDrive.customClientSecret)
+                            SecureField("Client Secret", text: $googleDrive.customClientSecret)
                                 .font(.system(size: 12, design: .monospaced))
                                 .autocapitalization(.none)
                                 .disableAutocorrection(true)
                                 .padding(6)
                                 .background(Color(UIColor.secondarySystemBackground))
                                 .cornerRadius(6)
+
+                            Divider().padding(.vertical, 2)
+
+                            Text("Or Direct Refresh Token (Bypasses OAuth Login):")
+                                .font(.caption2)
+                                .foregroundColor(.secondary)
+
+                            HStack {
+                                SecureField("Paste Refresh Token (1//...)", text: $directTokenInput)
+                                    .font(.system(size: 12, design: .monospaced))
+                                    .autocapitalization(.none)
+                                    .disableAutocorrection(true)
+                                    .padding(6)
+                                    .background(Color(UIColor.secondarySystemBackground))
+                                    .cornerRadius(6)
+
+                                Button("Save") {
+                                    let trimmed = directTokenInput.trimmingCharacters(in: .whitespacesAndNewlines)
+                                    if !trimmed.isEmpty {
+                                        googleDrive.setDirectTokens(accessToken: nil, refreshToken: trimmed)
+                                        directTokenInput = ""
+                                    }
+                                }
+                                .font(.caption)
+                                .disabled(directTokenInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                            }
                         }
                         .padding(.vertical, 4)
                     }
@@ -256,7 +283,7 @@ public struct SettingsView: View {
                     HStack {
                         Text("App Version")
                         Spacer()
-                        Text("2.1.3 (Fast Disk Engine & Instant Size Cache)")
+                        Text("2.1.4 (Hardened Release: Share, Restore & Sizing Overhaul)")
                             .foregroundColor(.secondary)
                     }
 
@@ -431,6 +458,25 @@ public struct GoogleSetupGuideSheet: View {
                     }
                     .padding()
                     .background(Color(UIColor.secondarySystemBackground).opacity(0.6))
+                    .cornerRadius(12)
+
+                    // Troubleshooting Card
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("⚠️ Troubleshooting Common Errors:")
+                            .font(.system(size: 13, weight: .bold))
+                            .foregroundColor(.orange)
+
+                        Text("• 'Error 401 invalid_client': You selected 'Web application' instead of 'iOS' when creating the OAuth Client ID in Google Cloud. Delete it and create an 'iOS' Client ID with Bundle ID: dev.moe.appvault.")
+                            .font(.caption2)
+                            .foregroundColor(.secondary)
+
+                        Text("• 'Access blocked: Authorization Error': In Google Cloud Console under 'OAuth consent screen', scroll down to 'Test users' and add your Gmail address.")
+                            .font(.caption2)
+                            .foregroundColor(.secondary)
+                    }
+                    .padding()
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(Color.orange.opacity(0.1))
                     .cornerRadius(12)
 
                     // Alternative Note

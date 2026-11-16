@@ -140,25 +140,33 @@ public final class AppsViewModel: ObservableObject {
 
             guard !discovered.isEmpty else { return }
 
-            // Progressive size calculation: update UI incrementally as apps are sized
             var currentApps = discovered
-            var updatedAny = false
 
-            for i in 0..<currentApps.count {
+            // Prioritize User Applications first (currently visible on screen)
+            let userIndices = currentApps.indices.filter { !currentApps[$0].isSystemApp && !currentApps[$0].isSized }
+            let sysIndices = currentApps.indices.filter { currentApps[$0].isSystemApp && !currentApps[$0].isSized }
+            let orderedIndices = userIndices + sysIndices
+
+            guard !orderedIndices.isEmpty else {
+                await MainActor.run { self.isScanning = false }
+                return
+            }
+
+            var processedCount = 0
+            for idx in orderedIndices {
                 guard !Task.isCancelled else { break }
 
-                let app = currentApps[i]
-                // If sizes were not already populated from cache
-                if app.appSizeBytes == 0 && app.dataSizeBytes == 0 && app.groupSizeBytes == 0 {
-                    let sizes = AppDiscoveryService.shared.calculateAppSizes(for: app)
-                    currentApps[i].appSizeBytes = sizes.appSize
-                    currentApps[i].dataSizeBytes = sizes.dataSize
-                    currentApps[i].groupSizeBytes = sizes.groupSize
-                    updatedAny = true
-                }
+                let app = currentApps[idx]
+                let sizes = AppDiscoveryService.shared.calculateAppSizes(for: app)
+                currentApps[idx].appSizeBytes = sizes.appSize
+                currentApps[idx].dataSizeBytes = sizes.dataSize
+                currentApps[idx].groupSizeBytes = sizes.groupSize
+                currentApps[idx].isSized = true
 
-                // Progressive update: update UI every 3 apps or on the last app
-                if updatedAny && (i % 3 == 0 || i == currentApps.count - 1) {
+                processedCount += 1
+
+                // Progressive update: stream UI updates every 2 apps, or on the last one
+                if processedCount % 2 == 0 || processedCount == orderedIndices.count {
                     let snapshot = currentApps
                     await MainActor.run {
                         self.apps = snapshot

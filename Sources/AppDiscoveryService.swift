@@ -14,7 +14,7 @@ public final class AppDiscoveryService {
     private let cacheTTL: TimeInterval = 60.0 // 60 seconds cache TTL
 
     // MARK: - Thread-safe App Size Cache
-    private struct AppSizeCacheEntry {
+    private struct AppSizeCacheEntry: Codable {
         let appSize: Int64
         let dataSize: Int64
         let groupSize: Int64
@@ -23,9 +23,20 @@ public final class AppDiscoveryService {
 
     private var appSizeCache: [String: AppSizeCacheEntry] = [:]
     private let sizeCacheLock = NSLock()
-    private let sizeCacheTTL: TimeInterval = 600.0 // 10 minutes cache TTL
+    private let sizeCacheTTL: TimeInterval = 1800.0 // 30 minutes cache TTL
 
-    private init() {}
+    private init() {
+        if let data = UserDefaults.standard.data(forKey: "appvault_size_cache_v1"),
+           let decoded = try? JSONDecoder().decode([String: AppSizeCacheEntry].self, from: data) {
+            self.appSizeCache = decoded
+        }
+    }
+
+    private func saveSizeCacheToDisk() {
+        if let data = try? JSONEncoder().encode(appSizeCache) {
+            UserDefaults.standard.set(data, forKey: "appvault_size_cache_v1")
+        }
+    }
 
     public func invalidateCache() {
         cacheLock.lock()
@@ -54,6 +65,7 @@ public final class AppDiscoveryService {
         } else {
             appSizeCache.removeAll()
         }
+        saveSizeCacheToDisk()
     }
 
     private func getContainerMaps(forceRefresh: Bool = false) -> ContainerMaps {
@@ -408,7 +420,8 @@ public final class AppDiscoveryService {
                 isSystemApp: isSystem,
                 appSizeBytes: cachedSizes?.appSize ?? 0,
                 dataSizeBytes: cachedSizes?.dataSize ?? 0,
-                groupSizeBytes: cachedSizes?.groupSize ?? 0
+                groupSizeBytes: cachedSizes?.groupSize ?? 0,
+                isSized: cachedSizes != nil
             )
             results.append(app)
         }
@@ -466,7 +479,8 @@ public final class AppDiscoveryService {
                     isSystemApp: false,
                     appSizeBytes: cachedSizes?.appSize ?? 0,
                     dataSizeBytes: cachedSizes?.dataSize ?? 0,
-                    groupSizeBytes: cachedSizes?.groupSize ?? 0
+                    groupSizeBytes: cachedSizes?.groupSize ?? 0,
+                    isSized: cachedSizes != nil
                 )
             }
         }
@@ -509,6 +523,7 @@ public final class AppDiscoveryService {
             groupSize: groupSize,
             timestamp: Date()
         )
+        saveSizeCacheToDisk()
         sizeCacheLock.unlock()
 
         return (appSize, dataSize, groupSize)
@@ -539,8 +554,10 @@ public final class AppDiscoveryService {
             guard lstat(fullPath, &st) == 0 else { continue }
             let fileType = st.st_mode & S_IFMT
 
-            // Do not follow symlinks to avoid circular recursion or counting files outside container
+            // CRITICAL: Call skipDescendants() on symlinks so NSDirectoryEnumerator NEVER follows symlinks
+            // out into the filesystem or into circular loops!
             if fileType == S_IFLNK {
+                enumerator.skipDescendants()
                 continue
             }
 
