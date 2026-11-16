@@ -152,7 +152,7 @@ public final class WebDAVService: ObservableObject {
     @Published public var remoteFiles: [WebDAVFile] = []
     @Published public var isLoading: Bool = false
 
-    private func updateConfiguredState() {
+    public func updateConfiguredState() {
         let clean = serverURL.trimmingCharacters(in: .whitespacesAndNewlines)
         self.isConfigured = !clean.isEmpty && (clean.hasPrefix("http://") || clean.hasPrefix("https://"))
     }

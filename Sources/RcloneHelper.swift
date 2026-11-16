@@ -59,7 +59,7 @@ public final class RcloneHelper: ObservableObject {
     }
 
     private static var candidateConfigs: [String] {
-        var paths = [
+        let paths = [
             appDocumentsConfigPath,
             "/var/mobile/.config/rclone/rclone.conf",
             "/var/root/.config/rclone/rclone.conf",
