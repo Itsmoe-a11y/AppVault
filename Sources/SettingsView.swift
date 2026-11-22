@@ -203,8 +203,7 @@ public struct SettingsView: View {
                                         Image(systemName: "safari")
                                         Text("Sign In via External Browser (iOS 16 Fix)")
                                     }
-                                    .font(.caption)
-                                    .fontWeight(.semibold)
+                                    .font(.caption.weight(.semibold))
                                     .foregroundColor(.blue)
                                     .frame(maxWidth: .infinity)
                                     .padding(.vertical, 8)

@@ -368,16 +368,19 @@ public final class StreamingAEADEncryptor {
     public init(password: String, onEncryptedChunk: @escaping (Data) async throws -> Void) throws {
         var saltBytes = [UInt8](repeating: 0, count: 16)
         guard SecRandomCopyBytes(kSecRandomDefault, saltBytes.count, &saltBytes) == errSecSuccess else {
-            throw CryptoError.encryptionFailed
+            throw CryptoError.saltGenerationFailed
         }
         var noncePrefixBytes = [UInt8](repeating: 0, count: 8)
         guard SecRandomCopyBytes(kSecRandomDefault, noncePrefixBytes.count, &noncePrefixBytes) == errSecSuccess else {
-            throw CryptoError.encryptionFailed
+            throw CryptoError.saltGenerationFailed
         }
 
         let salt = Data(saltBytes)
         self.baseNoncePrefix = Data(noncePrefixBytes)
-        self.key = try CryptoService.shared.deriveKey(from: password, salt: salt)
+        guard let key = CryptoService.shared.deriveKey(password: password, salt: salt) else {
+            throw CryptoError.keyDerivationFailed
+        }
+        self.key = key
 
         var hdr = Data("AVENC02\0".utf8)
         hdr.append(salt)
