@@ -101,7 +101,7 @@ public final class GoogleDriveService: NSObject, ObservableObject, ASWebAuthenti
 
     // Public iOS OAuth 2.0 Client ID (PKCE, no client secret required).
     // Set once by the app maintainer so end users sign in with 1 tap via Google's Email + Password + 2FA Safari sheet.
-    public static let bundledDefaultClientId = "__APPVAULT_GOOGLE_CLIENT_ID__"
+    public static let bundledDefaultClientId = "890695287693-eq0tg23dgr9f98uh8dm4ubp6nctc6iph.apps.googleusercontent.com"
 
     private static let keychainService = "dev.moe.appvault.gdrive"
     private static let keychainRefreshTokenAccount = "oauth_refresh_token"

@@ -36,7 +36,7 @@
 			<key>CFBundleURLSchemes</key>
 			<array>
 				<string>dev.moe.appvault</string>
-				<string>com.googleusercontent.apps.__APPVAULT_GOOGLE_CLIENT_PREFIX__</string>
+				<string>com.googleusercontent.apps.890695287693-eq0tg23dgr9f98uh8dm4ubp6nctc6iph</string>
 			</array>
 			<key>CFBundleURLName</key>
 			<string>dev.moe.appvault</string>
