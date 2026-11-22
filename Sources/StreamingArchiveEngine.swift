@@ -184,6 +184,33 @@ final class GzipStreamWriter {
         outBufferPtr.deallocate()
     }
 
+    func write(bytes basePtr: UnsafePointer<UInt8>, count: Int) async throws {
+        guard isOpen, count > 0 else { return }
+
+        var chunksToEmit: [Data] = []
+        streamPtr.pointee.next_in = UnsafeMutablePointer(mutating: basePtr)
+        streamPtr.pointee.avail_in = uInt(count)
+
+        while streamPtr.pointee.avail_in > 0 {
+            streamPtr.pointee.next_out = outBufferPtr
+            streamPtr.pointee.avail_out = uInt(outBufferSize)
+
+            let ret = deflate(streamPtr, Z_NO_FLUSH)
+            if ret == Z_STREAM_ERROR {
+                throw NSError(domain: "AppVault.Streaming", code: Int(ret), userInfo: [NSLocalizedDescriptionKey: "zlib deflate error: Z_STREAM_ERROR"])
+            }
+
+            let have = outBufferSize - Int(streamPtr.pointee.avail_out)
+            if have > 0 {
+                chunksToEmit.append(Data(bytes: outBufferPtr, count: have))
+            }
+        }
+
+        for chunk in chunksToEmit {
+            try await onChunk(chunk)
+        }
+    }
+
     func write(data: Data) async throws {
         guard isOpen, !data.isEmpty else { return }
 
@@ -713,7 +740,7 @@ public final class StreamingArchiveEngine {
 
     // MARK: - Stream Item Definition
     struct StreamItem {
-        let diskURL: URL
+        let diskPath: String
         let archiveRelativePath: String
         let isDirectory: Bool
         let isSymlink: Bool
@@ -865,11 +892,26 @@ public final class StreamingArchiveEngine {
             }
         }
 
-        // 4. Stream Source Files with Zero Memory/Staging Overhead
+        // 4. Stream Source Files with Constant RAM (Pure POSIX open/F_NOCACHE/read into 1 reused 64 KB buffer)
+        // Eliminates Objective-C NSFileHandle/NSData autorelease leaks that previously caused iOS Jetsam OOM kills at ~2.4 GB!
         var bytesProcessed: Int64 = 0
-        let bufferSize = 65536 // 64 KB read buffer
+        let bufferSize = 65536 // 64 KB reusable raw buffer
+        let readBuf = UnsafeMutablePointer<UInt8>.allocate(capacity: bufferSize)
+        let zeroBuf = UnsafeMutablePointer<UInt8>.allocate(capacity: bufferSize)
+        memset(zeroBuf, 0, bufferSize)
+        defer {
+            readBuf.deallocate()
+            zeroBuf.deallocate()
+        }
+
+        let totalFormatted: String = autoreleasepool {
+            ByteCountFormatter.string(fromByteCount: totalBytesToProcess, countStyle: .file)
+        }
+        var lastProgressEmit = Date.distantPast
 
         for item in items {
+            try Task.checkCancellation()
+
             if item.isDirectory {
                 try await writeTarItem(path: item.archiveRelativePath, size: 0, typeflag: "5", mode: 0o755, to: gzip)
                 continue
@@ -880,46 +922,55 @@ public final class StreamingArchiveEngine {
                 continue
             }
 
-            guard let handle = try? FileHandle(forReadingFrom: item.diskURL) else { continue }
+            let fd = open(item.diskPath, O_RDONLY)
+            guard fd >= 0 else { continue }
+            _ = fcntl(fd, F_NOCACHE, 1)
 
             do {
-                defer { try? handle.close() }
+                defer { close(fd) }
 
                 try await writeTarItem(path: item.archiveRelativePath, size: item.size, typeflag: "0", mode: item.mode, to: gzip)
 
                 var fileBytesRead: Int64 = 0
                 while fileBytesRead < item.size {
+                    try Task.checkCancellation()
                     let toRead = Int(min(Int64(bufferSize), item.size - fileBytesRead))
-                    guard let chunkData = try? handle.read(upToCount: toRead), !chunkData.isEmpty else {
+                    let n = read(fd, readBuf, toRead)
+                    if n <= 0 {
                         break
                     }
 
-                    try await gzip.write(data: chunkData)
-                    fileBytesRead += Int64(chunkData.count)
-                    bytesProcessed += Int64(chunkData.count)
+                    try await gzip.write(bytes: readBuf, count: n)
+                    fileBytesRead += Int64(n)
+                    bytesProcessed += Int64(n)
 
-                    if bytesProcessed % (512 * 1024) < Int64(bufferSize) || bytesProcessed == totalBytesToProcess {
+                    let now = Date()
+                    if now.timeIntervalSince(lastProgressEmit) >= 0.25 || bytesProcessed == totalBytesToProcess {
+                        lastProgressEmit = now
                         let progressFraction = totalBytesToProcess > 0 ? min(0.95, Double(bytesProcessed) / Double(totalBytesToProcess)) : 0.5
+                        let doneFormatted: String = autoreleasepool {
+                            ByteCountFormatter.string(fromByteCount: bytesProcessed, countStyle: .file)
+                        }
+                        let shortName = (item.archiveRelativePath as NSString).lastPathComponent
                         onProgress(OperationProgress(
                             stage: "Streaming Compression",
                             fractionCompleted: progressFraction,
-                            statusDetail: "Streaming \(item.archiveRelativePath) (\(ByteCountFormatter.string(fromByteCount: bytesProcessed, countStyle: .file)) / \(ByteCountFormatter.string(fromByteCount: totalBytesToProcess, countStyle: .file)))"
+                            statusDetail: "Streaming \(shortName) (\(doneFormatted) / \(totalFormatted))"
                         ))
                     }
                 }
 
-                // Zero-pad if file was shorter than declared or couldn't be fully read
+                // Zero-pad if file shrank while reading
                 var unreadRemaining = item.size - fileBytesRead
-                let zeroChunkSize = 65536
                 while unreadRemaining > 0 {
-                    let toPad = min(Int64(zeroChunkSize), unreadRemaining)
-                    try await gzip.write(data: Data(count: Int(toPad)))
-                    unreadRemaining -= toPad
+                    let toPad = Int(min(Int64(bufferSize), unreadRemaining))
+                    try await gzip.write(bytes: zeroBuf, count: toPad)
+                    unreadRemaining -= Int64(toPad)
                 }
 
                 let pad = (512 - (Int(item.size) % 512)) % 512
                 if pad > 0 {
-                    try await gzip.write(data: Data(count: pad))
+                    try await gzip.write(bytes: zeroBuf, count: pad)
                 }
             }
         }
@@ -954,7 +1005,7 @@ public final class StreamingArchiveEngine {
             if rootType == S_IFREG {
                 let size = Int64(rootSt.st_size)
                 items.append(StreamItem(
-                    diskURL: rootURL,
+                    diskPath: rootURL.path,
                     archiveRelativePath: baseArchivePath,
                     isDirectory: false,
                     isSymlink: false,
@@ -968,7 +1019,7 @@ public final class StreamingArchiveEngine {
                 let linkLen = readlink(rootURL.path, &linkBuf, linkBuf.count - 1)
                 let target = linkLen > 0 ? String(cString: linkBuf) : ""
                 items.append(StreamItem(
-                    diskURL: rootURL,
+                    diskPath: rootURL.path,
                     archiveRelativePath: baseArchivePath,
                     isDirectory: false,
                     isSymlink: true,
@@ -981,7 +1032,7 @@ public final class StreamingArchiveEngine {
         }
 
         items.append(StreamItem(
-            diskURL: rootURL,
+            diskPath: rootURL.path,
             archiveRelativePath: baseArchivePath,
             isDirectory: true,
             isSymlink: false,
@@ -990,73 +1041,82 @@ public final class StreamingArchiveEngine {
             mode: rootSt.st_mode
         ))
 
-        let resourceKeys: [URLResourceKey] = [.isDirectoryKey, .isRegularFileKey, .fileSizeKey, .isSymbolicLinkKey]
-        guard let enumerator = fileManager.enumerator(at: rootURL, includingPropertiesForKeys: resourceKeys, options: []) else {
+        let localFM = FileManager()
+        guard let enumerator = localFM.enumerator(at: rootURL, includingPropertiesForKeys: nil, options: []) else {
             return
         }
 
         let rootPath = rootURL.path
 
-        for case let url as URL in enumerator {
-            var subPath = url.path
-            if subPath.hasPrefix(rootPath) {
-                subPath.removeFirst(rootPath.count)
-            }
-            let cleanSubPath = subPath.hasPrefix("/") ? String(subPath.dropFirst()) : subPath
+        while true {
+            var finished = false
+            autoreleasepool {
+                guard let url = enumerator.nextObject() as? URL else {
+                    finished = true
+                    return
+                }
+                let itemPath = url.path
+                var subPath = itemPath
+                if subPath.hasPrefix(rootPath) {
+                    subPath.removeFirst(rootPath.count)
+                }
+                let cleanSubPath = subPath.hasPrefix("/") ? String(subPath.dropFirst()) : subPath
 
-            if !includeCaches {
-                let pathParts = cleanSubPath.components(separatedBy: "/")
-                if pathParts.contains("Caches") || pathParts.contains("tmp") {
-                    enumerator.skipDescendants()
-                    continue
+                if !includeCaches {
+                    let pathParts = cleanSubPath.components(separatedBy: "/")
+                    if pathParts.contains("Caches") || pathParts.contains("tmp") {
+                        enumerator.skipDescendants()
+                        return
+                    }
+                }
+
+                var st = stat()
+                guard lstat(itemPath, &st) == 0 else { return }
+                let fileType = st.st_mode & S_IFMT
+
+                // CRITICAL: Skip unix domain sockets, FIFOs, and character/block devices that crash or hang on read
+                guard fileType == S_IFDIR || fileType == S_IFREG || fileType == S_IFLNK else { return }
+
+                let fullArchivePath = "\(baseArchivePath)/\(cleanSubPath)"
+
+                if fileType == S_IFDIR {
+                    items.append(StreamItem(
+                        diskPath: itemPath,
+                        archiveRelativePath: fullArchivePath,
+                        isDirectory: true,
+                        isSymlink: false,
+                        symlinkTarget: "",
+                        size: 0,
+                        mode: st.st_mode
+                    ))
+                } else if fileType == S_IFLNK {
+                    var linkBuf = [CChar](repeating: 0, count: 1024)
+                    let linkLen = readlink(itemPath, &linkBuf, linkBuf.count - 1)
+                    let target = linkLen > 0 ? String(cString: linkBuf) : ""
+                    items.append(StreamItem(
+                        diskPath: itemPath,
+                        archiveRelativePath: fullArchivePath,
+                        isDirectory: false,
+                        isSymlink: true,
+                        symlinkTarget: target,
+                        size: 0,
+                        mode: st.st_mode
+                    ))
+                } else {
+                    let fileSize = Int64(st.st_size)
+                    items.append(StreamItem(
+                        diskPath: itemPath,
+                        archiveRelativePath: fullArchivePath,
+                        isDirectory: false,
+                        isSymlink: false,
+                        symlinkTarget: "",
+                        size: fileSize,
+                        mode: st.st_mode
+                    ))
+                    totalBytes += fileSize
                 }
             }
-
-            var st = stat()
-            guard lstat(url.path, &st) == 0 else { continue }
-            let fileType = st.st_mode & S_IFMT
-
-            // CRITICAL: Skip unix domain sockets, FIFOs, and character/block devices that crash or hang on read
-            guard fileType == S_IFDIR || fileType == S_IFREG || fileType == S_IFLNK else { continue }
-
-            let fullArchivePath = "\(baseArchivePath)/\(cleanSubPath)"
-
-            if fileType == S_IFDIR {
-                items.append(StreamItem(
-                    diskURL: url,
-                    archiveRelativePath: fullArchivePath,
-                    isDirectory: true,
-                    isSymlink: false,
-                    symlinkTarget: "",
-                    size: 0,
-                    mode: st.st_mode
-                ))
-            } else if fileType == S_IFLNK {
-                var linkBuf = [CChar](repeating: 0, count: 1024)
-                let linkLen = readlink(url.path, &linkBuf, linkBuf.count - 1)
-                let target = linkLen > 0 ? String(cString: linkBuf) : ""
-                items.append(StreamItem(
-                    diskURL: url,
-                    archiveRelativePath: fullArchivePath,
-                    isDirectory: false,
-                    isSymlink: true,
-                    symlinkTarget: target,
-                    size: 0,
-                    mode: st.st_mode
-                ))
-            } else {
-                let fileSize = Int64(st.st_size)
-                items.append(StreamItem(
-                    diskURL: url,
-                    archiveRelativePath: fullArchivePath,
-                    isDirectory: false,
-                    isSymlink: false,
-                    symlinkTarget: "",
-                    size: fileSize,
-                    mode: st.st_mode
-                ))
-                totalBytes += fileSize
-            }
+            if finished { break }
         }
     }
 }

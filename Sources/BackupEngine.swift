@@ -115,7 +115,9 @@ public final class BackupEngine {
                 ))
             }
         ) { chunk in
-            try writeHandle.write(contentsOf: chunk)
+            try autoreleasepool {
+                try writeHandle.write(contentsOf: chunk)
+            }
             totalWritten += Int64(chunk.count)
             if !shouldEncrypt {
                 hasher.update(data: chunk)
@@ -218,7 +220,12 @@ public final class BackupEngine {
             while chunkBuffer.count >= alignedChunkSize {
                 try Task.checkCancellation()
                 let toUpload = Data(chunkBuffer.prefix(alignedChunkSize))
-                chunkBuffer.removeFirst(alignedChunkSize)
+                // Compact backing allocation immediately so Swift Data slices never grow across 40GB+ streams
+                if chunkBuffer.count == alignedChunkSize {
+                    chunkBuffer = Data()
+                } else {
+                    chunkBuffer = Data(chunkBuffer.dropFirst(alignedChunkSize))
+                }
 
                 _ = try await GoogleDriveService.shared.uploadChunk(
                     sessionURL: sessionURL,
@@ -228,10 +235,13 @@ public final class BackupEngine {
                     totalFileSize: nil
                 )
                 currentOffset += Int64(toUpload.count)
+                let uploadedLabel: String = autoreleasepool {
+                    ByteCountFormatter.string(fromByteCount: currentOffset, countStyle: .file)
+                }
                 progress(OperationProgress(
                     stage: shouldEncrypt ? "Encrypting & Uploading" : "Cloud Streaming",
                     fractionCompleted: min(0.94, max(0.12, lastStreamFraction)),
-                    statusDetail: "Uploaded \(ByteCountFormatter.string(fromByteCount: currentOffset, countStyle: .file)) (\(formatSpeed())) • 0 MB local disk used"
+                    statusDetail: "Uploaded \(uploadedLabel) (\(formatSpeed())) • 0 MB local disk used"
                 ))
             }
         }
@@ -260,7 +270,9 @@ public final class BackupEngine {
             note: note,
             onProgress: { p in
                 lastStreamFraction = min(0.94, max(0.12, 0.12 + p.fractionCompleted * 0.82))
-                let uploadedStr = ByteCountFormatter.string(fromByteCount: currentOffset, countStyle: .file)
+                let uploadedStr: String = autoreleasepool {
+                    ByteCountFormatter.string(fromByteCount: currentOffset, countStyle: .file)
+                }
                 let detail = currentOffset > 0
                     ? "\(p.statusDetail) • \(uploadedStr) uploaded (\(formatSpeed()))"
                     : p.statusDetail

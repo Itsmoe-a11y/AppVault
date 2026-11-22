@@ -251,8 +251,11 @@ public final class GoogleDriveService: NSObject, ObservableObject, ASWebAuthenti
     /// Dedicated upload session with NoRedirectSessionDelegate so HTTP 308 Resume Incomplete
     /// is always delivered directly to uploadChunk instead of triggering redirect handling on iOS 16.
     private lazy var uploadSession: URLSession = {
-        let cfg = URLSessionConfiguration.default
-        cfg.timeoutIntervalForRequest = 60
+        let cfg = URLSessionConfiguration.ephemeral
+        cfg.urlCache = nil
+        cfg.requestCachePolicy = .reloadIgnoringLocalCacheData
+        cfg.httpShouldSetCookies = false
+        cfg.timeoutIntervalForRequest = 120
         cfg.timeoutIntervalForResource = 600
         cfg.waitsForConnectivity = false
         return URLSession(configuration: cfg, delegate: noRedirectDelegate, delegateQueue: nil)
