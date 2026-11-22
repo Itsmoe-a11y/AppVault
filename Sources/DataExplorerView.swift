@@ -60,26 +60,62 @@ public struct ContainerFileItem: Identifiable, Hashable {
     }
 }
 
+private enum DataExplorerSheet: Identifiable {
+    case plist(URL)
+    case sqlite(URL)
+
+    var id: String {
+        switch self {
+        case .plist(let u): return "plist_\(u.path)"
+        case .sqlite(let u): return "sqlite_\(u.path)"
+        }
+    }
+}
+
+private struct ContainerRootOption: Identifiable, Hashable {
+    let id: String
+    let label: String
+    let url: URL
+}
+
 // MARK: - Data Explorer View
 public struct DataExplorerView: View {
     public let app: InstalledApp
-    private let rootDirectory: URL
+    private let availableRoots: [ContainerRootOption]
 
+    @State private var selectedRootID: String
+    @State private var rootDirectory: URL
     @State private var currentDirectory: URL
     @State private var items: [ContainerFileItem] = []
     @State private var isLoading: Bool = false
     @State private var errorMessage: String? = nil
     @State private var searchQuery: String = ""
-    @State private var selectedPlistURL: URL? = nil
-    @State private var selectedSQLiteURL: URL? = nil
+    @State private var activeSheet: DataExplorerSheet? = nil
     @State private var deleteConfirmItem: ContainerFileItem? = nil
     @State private var deleteErrorMessage: String? = nil
 
     public init(app: InstalledApp) {
         self.app = app
-        let defaultRoot = app.dataContainerURL ?? URL(fileURLWithPath: "/")
-        self.rootDirectory = defaultRoot
-        _currentDirectory = State(initialValue: defaultRoot)
+        var roots: [ContainerRootOption] = []
+        if let dataURL = app.dataContainerURL {
+            roots.append(ContainerRootOption(id: "data", label: "Data Container", url: dataURL))
+        }
+        for groupID in app.groupContainerURLs.keys.sorted() {
+            if let groupURL = app.groupContainerURLs[groupID] {
+                roots.append(ContainerRootOption(id: "group_\(groupID)", label: "Group: \(groupID)", url: groupURL))
+            }
+        }
+        if let bundleURL = app.bundleURL {
+            roots.append(ContainerRootOption(id: "bundle", label: "App Bundle (.app)", url: bundleURL))
+        }
+        if roots.isEmpty {
+            roots.append(ContainerRootOption(id: "root", label: "Filesystem Root", url: URL(fileURLWithPath: "/")))
+        }
+        self.availableRoots = roots
+        let initial = roots[0]
+        _selectedRootID = State(initialValue: initial.id)
+        _rootDirectory = State(initialValue: initial.url)
+        _currentDirectory = State(initialValue: initial.url)
     }
 
     private var canNavigateUp: Bool {
@@ -96,22 +132,61 @@ public struct DataExplorerView: View {
         return items.filter { $0.name.lowercased().contains(query) }
     }
 
-    // Breadcrumbs Path Components relative to root
+    // Breadcrumbs Path Components relative to root (handles symlinks outside container safely)
     private var breadcrumbSegments: [(name: String, url: URL)] {
         var segments: [(name: String, url: URL)] = []
         var cursor = currentDirectory.standardized
         let root = rootDirectory.standardized
+        let rootPrefix = root.path == "/" ? "/" : root.path + "/"
+        let isInsideRoot = (cursor.path == root.path) || cursor.path.hasPrefix(rootPrefix)
 
-        while cursor.path != root.path && cursor.path != "/" {
-            segments.append((name: cursor.lastPathComponent, url: cursor))
-            cursor = cursor.deletingLastPathComponent().standardized
+        if isInsideRoot {
+            while cursor.path != root.path && cursor.path != "/" {
+                segments.append((name: cursor.lastPathComponent, url: cursor))
+                cursor = cursor.deletingLastPathComponent().standardized
+            }
+            let rootName = availableRoots.first(where: { $0.id == selectedRootID })?.label ?? "Container"
+            segments.append((name: rootName, url: root))
+        } else {
+            while cursor.path != "/" {
+                segments.append((name: cursor.lastPathComponent, url: cursor))
+                cursor = cursor.deletingLastPathComponent().standardized
+            }
+            segments.append((name: "/", url: URL(fileURLWithPath: "/")))
         }
-        segments.append((name: "Container", url: root))
         return segments.reversed()
     }
 
     public var body: some View {
         VStack(spacing: 0) {
+            // Container Switcher (Data / App Groups / App Bundle)
+            if availableRoots.count > 1 {
+                HStack {
+                    Image(systemName: "folder.badge.gearshape")
+                        .font(.caption)
+                        .foregroundColor(.blue)
+                    Picker("Container", selection: $selectedRootID) {
+                        ForEach(availableRoots) { option in
+                            Text(option.label).tag(option.id)
+                        }
+                    }
+                    .pickerStyle(MenuPickerStyle())
+                    .onChange(of: selectedRootID) { newID in
+                        if let matched = availableRoots.first(where: { $0.id == newID }) {
+                            rootDirectory = matched.url
+                            currentDirectory = matched.url
+                            searchQuery = ""
+                            loadDirectory()
+                        }
+                    }
+                    Spacer()
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 6)
+                .background(Color(UIColor.tertiarySystemBackground))
+                Divider()
+            }
+
             // Header: Breadcrumb Trail & Quick Navigation
             navigationHeader
 
@@ -133,17 +208,13 @@ public struct DataExplorerView: View {
         .onAppear {
             loadDirectory()
         }
-        .sheet(item: Binding<URLItem?>(
-            get: { selectedPlistURL.map { URLItem(url: $0) } },
-            set: { selectedPlistURL = $0?.url }
-        )) { item in
-            PlistEditorView(fileURL: item.url)
-        }
-        .sheet(item: Binding<URLItem?>(
-            get: { selectedSQLiteURL.map { URLItem(url: $0) } },
-            set: { selectedSQLiteURL = $0?.url }
-        )) { item in
-            SQLiteInspectorView(fileURL: item.url)
+        .sheet(item: $activeSheet) { sheet in
+            switch sheet {
+            case .plist(let url):
+                PlistEditorView(fileURL: url)
+            case .sqlite(let url):
+                SQLiteInspectorView(fileURL: url)
+            }
         }
         .alert(isPresented: Binding<Bool>(
             get: { deleteErrorMessage != nil },
@@ -399,8 +470,9 @@ public struct DataExplorerView: View {
                     .font(.caption2)
             } else if item.url.pathExtension.lowercased() == "plist" {
                 Button("Edit") {
-                    selectedPlistURL = item.url
+                    activeSheet = .plist(item.url)
                 }
+                .buttonStyle(BorderlessButtonStyle())
                 .font(.system(size: 11, weight: .semibold))
                 .padding(.horizontal, 9)
                 .padding(.vertical, 4)
@@ -409,8 +481,9 @@ public struct DataExplorerView: View {
                 .cornerRadius(6)
             } else if ["sqlite", "db", "sqlite3"].contains(item.url.pathExtension.lowercased()) {
                 Button("Inspect") {
-                    selectedSQLiteURL = item.url
+                    activeSheet = .sqlite(item.url)
                 }
+                .buttonStyle(BorderlessButtonStyle())
                 .font(.system(size: 11, weight: .semibold))
                 .padding(.horizontal, 9)
                 .padding(.vertical, 4)
@@ -438,13 +511,13 @@ public struct DataExplorerView: View {
                 loadDirectory()
             } else {
                 let ext = item.url.pathExtension.lowercased()
-                if ext == "plist" { selectedPlistURL = item.url }
-                else if ["sqlite", "db", "sqlite3"].contains(ext) { selectedSQLiteURL = item.url }
+                if ext == "plist" { activeSheet = .plist(item.url) }
+                else if ["sqlite", "db", "sqlite3"].contains(ext) { activeSheet = .sqlite(item.url) }
             }
         } else {
             let ext = item.url.pathExtension.lowercased()
-            if ext == "plist" { selectedPlistURL = item.url }
-            else if ["sqlite", "db", "sqlite3"].contains(ext) { selectedSQLiteURL = item.url }
+            if ext == "plist" { activeSheet = .plist(item.url) }
+            else if ["sqlite", "db", "sqlite3"].contains(ext) { activeSheet = .sqlite(item.url) }
         }
     }
 
@@ -599,6 +672,7 @@ struct PlistEditorView: View {
     @State private var saveStatus: String? = nil
     @State private var editingRow: PlistDisplayRow? = nil
     @State private var editInput: String = ""
+    @State private var editError: String? = nil
 
     var body: some View {
         NavigationView {
@@ -731,8 +805,10 @@ struct PlistEditorView: View {
                     if row.type == .string || row.type == .number {
                         Button("Edit") {
                             editInput = row.valueSummary
+                            editError = nil
                             editingRow = row
                         }
+                        .buttonStyle(BorderlessButtonStyle())
                         .font(.caption2)
                         .padding(.horizontal, 8)
                         .padding(.vertical, 3)
@@ -763,18 +839,29 @@ struct PlistEditorView: View {
                         TextField("Enter string value", text: $editInput)
                             .font(.system(size: 14, design: .monospaced))
                     }
+
+                    if let err = editError {
+                        Text(err)
+                            .font(.caption)
+                            .foregroundColor(.red)
+                    }
                 }
             }
             .navigationTitle("Edit Value")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button("Cancel") { editingRow = nil }
+                    Button("Cancel") {
+                        editError = nil
+                        editingRow = nil
+                    }
                 }
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Done") {
-                        applyEdit(row: row, newText: editInput)
-                        editingRow = nil
+                        if applyEdit(row: row, newText: editInput) {
+                            editError = nil
+                            editingRow = nil
+                        }
                     }
                 }
             }
@@ -782,17 +869,23 @@ struct PlistEditorView: View {
         .navigationViewStyle(StackNavigationViewStyle())
     }
 
-    private func applyEdit(row: PlistDisplayRow, newText: String) {
+    @discardableResult
+    private func applyEdit(row: PlistDisplayRow, newText: String) -> Bool {
         if row.type == .number {
-            if let intVal = Int(newText) {
+            let trimmed = newText.trimmingCharacters(in: .whitespacesAndNewlines)
+            if let intVal = Int(trimmed) {
                 updateEntry(key: row.key, value: intVal)
-            } else if let dblVal = Double(newText) {
+                return true
+            } else if let dblVal = Double(trimmed) {
                 updateEntry(key: row.key, value: dblVal)
+                return true
             } else {
-                updateEntry(key: row.key, value: newText)
+                editError = "Invalid number. Enter an integer or decimal (e.g. 42 or 3.14) to preserve plist type."
+                return false
             }
         } else {
             updateEntry(key: row.key, value: newText)
+            return true
         }
     }
 

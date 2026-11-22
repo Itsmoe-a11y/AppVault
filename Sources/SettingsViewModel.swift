@@ -1,11 +1,47 @@
 import Foundation
-import SwiftUI
 import Combine
 
 @MainActor
 public final class SettingsViewModel: ObservableObject {
-    @Published public var defaultBackupMode: BackupMode = .dataOnly
-    @Published public var defaultIncludeCaches: Bool = false
+    public static let defaultModeKey = "appvault_default_backup_mode"
+    public static let defaultCachesKey = "appvault_default_include_caches"
+    public static let maxBackupsPerAppKey = "appvault_max_backups_per_app"
+
+    public static var savedDefaultBackupMode: BackupMode {
+        if let raw = UserDefaults.standard.string(forKey: defaultModeKey),
+           let mode = BackupMode(rawValue: raw) {
+            return mode
+        }
+        return .dataOnly
+    }
+
+    public static var savedDefaultIncludeCaches: Bool {
+        UserDefaults.standard.bool(forKey: defaultCachesKey)
+    }
+
+    public static var savedMaxBackupsPerApp: Int {
+        UserDefaults.standard.integer(forKey: maxBackupsPerAppKey)
+    }
+
+    @Published public var defaultBackupMode: BackupMode {
+        didSet {
+            UserDefaults.standard.set(defaultBackupMode.rawValue, forKey: Self.defaultModeKey)
+        }
+    }
+
+    @Published public var defaultIncludeCaches: Bool {
+        didSet {
+            UserDefaults.standard.set(defaultIncludeCaches, forKey: Self.defaultCachesKey)
+        }
+    }
+
+    /// 0 = Unlimited, otherwise keep only the newest N local backups per bundle ID.
+    @Published public var maxBackupsPerApp: Int {
+        didSet {
+            UserDefaults.standard.set(max(0, maxBackupsPerApp), forKey: Self.maxBackupsPerAppKey)
+        }
+    }
+
     @Published public var freeDiskSpace: String = "Calculating..."
     @Published public var backupStorageUsed: String = "Calculating..."
     @Published public var tempStorageUsed: String = "Calculating..."
@@ -17,6 +53,9 @@ public final class SettingsViewModel: ObservableObject {
     private var calculationTask: Task<Void, Never>? = nil
 
     public init() {
+        self.defaultBackupMode = Self.savedDefaultBackupMode
+        self.defaultIncludeCaches = Self.savedDefaultIncludeCaches
+        self.maxBackupsPerApp = Self.savedMaxBackupsPerApp
         refreshDiagnostics()
     }
 
@@ -69,7 +108,7 @@ public final class SettingsViewModel: ObservableObject {
             if let items = try? fm.contentsOfDirectory(at: tempURL, includingPropertiesForKeys: nil) {
                 for item in items {
                     let name = item.lastPathComponent
-                    if name.contains("AppVault") || name.contains("CloudRestore") || name.contains("Meta_") {
+                    if name.contains("AppVault") || name.contains("CloudRestore") || name.contains("WebDAVRestore") || name.contains("Meta_") {
                         try? fm.removeItem(at: item)
                     }
                 }

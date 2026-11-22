@@ -10,6 +10,11 @@ public struct KeychainItem: Codable, Hashable {
     public let dataBase64: String
     public let label: String?
     public let comment: String?
+    // Internet password specific attributes (backwards-compatible optionals)
+    public let server: String?
+    public let protocolType: String?
+    public let port: Int?
+    public let path: String?
 
     public init(
         secClass: String,
@@ -18,7 +23,11 @@ public struct KeychainItem: Codable, Hashable {
         accessGroup: String?,
         dataBase64: String,
         label: String? = nil,
-        comment: String? = nil
+        comment: String? = nil,
+        server: String? = nil,
+        protocolType: String? = nil,
+        port: Int? = nil,
+        path: String? = nil
     ) {
         self.secClass = secClass
         self.service = service
@@ -27,6 +36,10 @@ public struct KeychainItem: Codable, Hashable {
         self.dataBase64 = dataBase64
         self.label = label
         self.comment = comment
+        self.server = server
+        self.protocolType = protocolType
+        self.port = port
+        self.path = path
     }
 }
 
@@ -34,6 +47,23 @@ public final class KeychainService {
     public static let shared = KeychainService()
 
     private init() {}
+
+    // Strict bundle ID boundary matching (prevents "com.app" from matching "com.app.pro")
+    private func attribute(_ value: String?, matchesBundleID bundleID: String) -> Bool {
+        guard let raw = value?.trimmingCharacters(in: .whitespacesAndNewlines), !raw.isEmpty else {
+            return false
+        }
+        let val = raw.lowercased()
+        let bid = bundleID.lowercased()
+        if val == bid { return true }
+        // Team-prefixed access group: e.g. "TEAMID1234.com.example.app" or "group.com.example.app"
+        if val.hasSuffix("." + bid) { return true }
+        // Exact sub-service prefix: e.g. "com.example.app.auth" (must be followed by '.' or ':' or '/')
+        if val.hasPrefix(bid + ".") || val.hasPrefix(bid + ":") || val.hasPrefix(bid + "/") {
+            return true
+        }
+        return false
+    }
 
     // MARK: - Extract Keychain Items for App
     public func dumpKeychainItems(for bundleIdentifier: String) -> [KeychainItem] {
@@ -45,10 +75,9 @@ public final class KeychainService {
         ]
 
         for secClass in classes {
-            // Step 1: Query metadata attributes first without requesting secret data.
-            // This prevents blocking background threads or triggering biometric UI prompts
-            // (Touch ID / Face ID / User Presence) on items protected by kSecAccessControl.
-            var metaQuery: [String: Any] = [
+            let isGeneric = (secClass == kSecClassGenericPassword)
+
+            let metaQuery: [String: Any] = [
                 kSecClass as String: secClass,
                 kSecMatchLimit as String: kSecMatchLimitAll,
                 kSecReturnAttributes as String: true,
@@ -64,21 +93,23 @@ public final class KeychainService {
             }
 
             for dict in array {
-                let service = dict[kSecAttrService as String] as? String
+                let service = isGeneric ? (dict[kSecAttrService as String] as? String) : nil
+                let server = !isGeneric ? (dict[kSecAttrServer as String] as? String) : nil
+                let proto = !isGeneric ? (dict[kSecAttrProtocol as String] as? String) : nil
+                let port = !isGeneric ? (dict[kSecAttrPort as String] as? Int) : nil
+                let path = !isGeneric ? (dict[kSecAttrPath as String] as? String) : nil
                 let account = dict[kSecAttrAccount as String] as? String
                 let accessGroup = dict[kSecAttrAccessGroup as String] as? String
                 let label = dict[kSecAttrLabel as String] as? String
                 let comment = dict[kSecAttrComment as String] as? String
 
-                // Filter items matching bundleIdentifier or app group
-                let matchesApp = (service?.contains(bundleIdentifier) == true) ||
-                                 (accessGroup?.contains(bundleIdentifier) == true) ||
-                                 (account?.contains(bundleIdentifier) == true) ||
-                                 (label?.contains(bundleIdentifier) == true)
+                let matchesApp = attribute(accessGroup, matchesBundleID: bundleIdentifier) ||
+                                 attribute(service, matchesBundleID: bundleIdentifier) ||
+                                 attribute(server, matchesBundleID: bundleIdentifier) ||
+                                 attribute(label, matchesBundleID: bundleIdentifier)
 
                 guard matchesApp else { continue }
 
-                // Step 2: Fetch the item's secret data with explicit UI suppression
                 var itemQuery: [String: Any] = [
                     kSecClass as String: secClass,
                     kSecMatchLimit as String: kSecMatchLimitOne,
@@ -89,8 +120,15 @@ public final class KeychainService {
                 if let account = account, !account.isEmpty {
                     itemQuery[kSecAttrAccount as String] = account
                 }
-                if let service = service, !service.isEmpty {
-                    itemQuery[kSecAttrService as String] = service
+                if isGeneric {
+                    if let service = service, !service.isEmpty {
+                        itemQuery[kSecAttrService as String] = service
+                    }
+                } else {
+                    if let server = server, !server.isEmpty { itemQuery[kSecAttrServer as String] = server }
+                    if let proto = proto, !proto.isEmpty { itemQuery[kSecAttrProtocol as String] = proto }
+                    if let port = port { itemQuery[kSecAttrPort as String] = port }
+                    if let path = path, !path.isEmpty { itemQuery[kSecAttrPath as String] = path }
                 }
                 if let accessGroup = accessGroup, !accessGroup.isEmpty {
                     itemQuery[kSecAttrAccessGroup as String] = accessGroup
@@ -100,20 +138,21 @@ public final class KeychainService {
                 let dataStatus = SecItemCopyMatching(itemQuery as CFDictionary, &dataResult)
 
                 if dataStatus == errSecSuccess, let secretData = dataResult as? Data {
-                    let secClassStr = (secClass == kSecClassGenericPassword) ? "generic" : "internet"
                     let item = KeychainItem(
-                        secClass: secClassStr,
+                        secClass: isGeneric ? "generic" : "internet",
                         service: service,
                         account: account,
                         accessGroup: accessGroup,
                         dataBase64: secretData.base64EncodedString(),
                         label: label,
-                        comment: comment
+                        comment: comment,
+                        server: server,
+                        protocolType: proto,
+                        port: port,
+                        path: path
                     )
                     items.append(item)
                 } else if dataStatus == errSecInteractionNotAllowed {
-                    // Item requires Touch ID / Face ID / Passcode and was safely skipped
-                    // without hanging or throwing an uncaught exception.
                     NSLog("[KeychainService] Item for %@ skipped: requires user presence / biometric authentication.", bundleIdentifier)
                 }
             }
@@ -127,52 +166,59 @@ public final class KeychainService {
         var restoredCount = 0
 
         for item in items {
-            // Robust Base64 decoding with whitespace/formatting tolerance
             guard let secretData = Data(base64Encoded: item.dataBase64, options: .ignoreUnknownCharacters),
                   !secretData.isEmpty else {
                 continue
             }
 
-            let secClass = (item.secClass == "generic") ? kSecClassGenericPassword : kSecClassInternetPassword
+            let isGeneric = (item.secClass == "generic")
+            let secClass = isGeneric ? kSecClassGenericPassword : kSecClassInternetPassword
 
-            // 1. Delete existing matching item first to avoid duplicate item errors
-            var deleteQuery: [String: Any] = [
-                kSecClass as String: secClass
-            ]
-            if let service = item.service, !service.isEmpty { deleteQuery[kSecAttrService as String] = service }
-            if let account = item.account, !account.isEmpty { deleteQuery[kSecAttrAccount as String] = account }
-            if let accessGroup = item.accessGroup, !accessGroup.isEmpty { deleteQuery[kSecAttrAccessGroup as String] = accessGroup }
+            func makeMatchQuery(includeAccessGroup: Bool) -> [String: Any] {
+                var q: [String: Any] = [kSecClass as String: secClass]
+                if let account = item.account, !account.isEmpty {
+                    q[kSecAttrAccount as String] = account
+                }
+                if isGeneric {
+                    if let service = item.service, !service.isEmpty {
+                        q[kSecAttrService as String] = service
+                    }
+                } else {
+                    if let server = item.server, !server.isEmpty { q[kSecAttrServer as String] = server }
+                    if let proto = item.protocolType, !proto.isEmpty { q[kSecAttrProtocol as String] = proto }
+                    if let port = item.port { q[kSecAttrPort as String] = port }
+                    if let path = item.path, !path.isEmpty { q[kSecAttrPath as String] = path }
+                }
+                if includeAccessGroup, let accessGroup = item.accessGroup, !accessGroup.isEmpty {
+                    q[kSecAttrAccessGroup as String] = accessGroup
+                }
+                return q
+            }
 
+            // 1. Delete existing matching item first
+            let deleteQuery = makeMatchQuery(includeAccessGroup: true)
             _ = SecItemDelete(deleteQuery as CFDictionary)
 
             // 2. Add restored item
-            var addQuery: [String: Any] = [
-                kSecClass as String: secClass,
-                kSecValueData as String: secretData,
-                kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlock
-            ]
-            if let service = item.service, !service.isEmpty { addQuery[kSecAttrService as String] = service }
-            if let account = item.account, !account.isEmpty { addQuery[kSecAttrAccount as String] = account }
+            var addQuery = makeMatchQuery(includeAccessGroup: true)
+            addQuery[kSecValueData as String] = secretData
+            addQuery[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlock
             if let label = item.label, !label.isEmpty { addQuery[kSecAttrLabel as String] = label }
             if let comment = item.comment, !comment.isEmpty { addQuery[kSecAttrComment as String] = comment }
-            if let accessGroup = item.accessGroup, !accessGroup.isEmpty { addQuery[kSecAttrAccessGroup as String] = accessGroup }
 
             var status = SecItemAdd(addQuery as CFDictionary, nil)
+            var usedAccessGroup = true
 
-            // If adding fails with missing entitlement for the foreign accessGroup, retry without accessGroup
+            // Retry without accessGroup only if missing entitlement for foreign group
             if status == errSecMissingEntitlement && item.accessGroup != nil {
+                usedAccessGroup = false
                 addQuery.removeValue(forKey: kSecAttrAccessGroup as String)
                 status = SecItemAdd(addQuery as CFDictionary, nil)
             }
 
-            // If item already exists (errSecDuplicateItem), perform SecItemUpdate
+            // If item already exists, update strictly within matching access group
             if status == errSecDuplicateItem {
-                var updateQuery: [String: Any] = [
-                    kSecClass as String: secClass
-                ]
-                if let service = item.service, !service.isEmpty { updateQuery[kSecAttrService as String] = service }
-                if let account = item.account, !account.isEmpty { updateQuery[kSecAttrAccount as String] = account }
-
+                let updateQuery = makeMatchQuery(includeAccessGroup: usedAccessGroup)
                 var updateAttributes: [String: Any] = [
                     kSecValueData as String: secretData,
                     kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlock
@@ -191,7 +237,7 @@ public final class KeychainService {
         return restoredCount
     }
 
-    // MARK: - Secure Credential Storage Helpers (for Tokens & Passwords)
+    // MARK: - Secure Credential Storage Helpers (for Tokens & Secrets)
     @discardableResult
     public func savePassword(service: String, account: String, password: String) -> Bool {
         guard let data = password.data(using: .utf8) else { return false }
@@ -213,9 +259,7 @@ public final class KeychainService {
 
         let status = SecItemAdd(addQuery as CFDictionary, nil)
         if status == errSecDuplicateItem {
-            let updateAttributes: [String: Any] = [
-                kSecValueData as String: data
-            ]
+            let updateAttributes: [String: Any] = [kSecValueData as String: data]
             return SecItemUpdate(deleteQuery as CFDictionary, updateAttributes as CFDictionary) == errSecSuccess
         }
 

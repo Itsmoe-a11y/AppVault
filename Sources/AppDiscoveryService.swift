@@ -266,20 +266,14 @@ public final class AppDiscoveryService {
             return true
         }
 
-        // 4. Common root domain & company matching
+        // 4. Strict 3-segment app-specific match (avoids merging unrelated apps like com.google.Gmail & com.google.Chrome)
         let groupParts = cleanGroup.components(separatedBy: ".")
         let bundleParts = cleanBundle.components(separatedBy: ".")
-        if groupParts.count >= 2 && bundleParts.count >= 2 {
-            let genericDomains = ["com", "net", "org", "io", "app", "dev", "co", "uk", "de"]
-            if !genericDomains.contains(groupParts[0]) {
-                if groupParts[0] == bundleParts[0] {
-                    return true
-                }
-            } else if groupParts[0] == bundleParts[0] && groupParts[1] == bundleParts[1] {
-                // Same top domain and company (e.g. net.whatsapp or com.burbn)
-                if !genericDomains.contains(groupParts[1]) {
-                    return true
-                }
+        if groupParts.count >= 3 && bundleParts.count >= 3 {
+            if groupParts[0] == bundleParts[0] &&
+               groupParts[1] == bundleParts[1] &&
+               groupParts[2] == bundleParts[2] {
+                return true
             }
         }
 
@@ -472,7 +466,7 @@ public final class AppDiscoveryService {
                 let version = (plist["CFBundleShortVersionString"] as? String) ?? "1.0"
                 let build = (plist["CFBundleVersion"] as? String) ?? "1"
 
-                let dataURL = containerMaps.dataContainers[bundleID]
+                let dataURL = containerMaps.dataContainers[bundleID] ?? containerMaps.dataContainers[bundleID.lowercased()]
 
                 let groups = resolveGroupContainers(
                     for: bundleID,

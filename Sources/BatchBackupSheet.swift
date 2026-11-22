@@ -14,10 +14,15 @@ public struct BatchBackupSheet: View {
     @Environment(\.presentationMode) var presentationMode
     @EnvironmentObject var backupsVM: BackupsViewModel
     @ObservedObject var googleDrive = GoogleDriveService.shared
+    @ObservedObject var webdav = WebDAVService.shared
 
-    @State private var selectedMode: BackupMode = .dataOnly
+    @State private var selectedMode: BackupMode
     @State private var selectedDestination: BackupDestination = .local
-    @State private var includeCaches: Bool = false
+    @State private var includeCaches: Bool
+    @State private var includeKeychain: Bool = true
+    @State private var includeAppGroups: Bool = true
+    @State private var enableEncryption: Bool = false
+    @State private var encryptionPassword: String = ""
     @State private var isExecuting: Bool = false
     @State private var isCompleted: Bool = false
     @State private var currentAppIndex: Int = 0
@@ -29,6 +34,8 @@ public struct BatchBackupSheet: View {
 
     public init(apps: [InstalledApp]) {
         self.apps = apps
+        _selectedMode = State(initialValue: SettingsViewModel.savedDefaultBackupMode)
+        _includeCaches = State(initialValue: SettingsViewModel.savedDefaultIncludeCaches)
     }
 
     private var successCount: Int {
@@ -37,6 +44,21 @@ public struct BatchBackupSheet: View {
 
     private var failureCount: Int {
         results.filter { !$0.isSuccess }.count
+    }
+
+    private var estimatedBytes: Int64 {
+        apps.reduce(0) { sum, app in
+            let appPart = selectedMode == .full ? app.appSizeBytes : 0
+            let groupPart = includeAppGroups ? app.groupSizeBytes : 0
+            return sum + app.dataSizeBytes + groupPart + appPart
+        }
+    }
+
+    private var isStartDisabled: Bool {
+        if selectedDestination == .googleDrive && !googleDrive.isAuthenticated { return true }
+        if selectedDestination == .webdav && !webdav.isConfigured { return true }
+        if enableEncryption && encryptionPassword.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return true }
+        return apps.isEmpty
     }
 
     public var body: some View {
@@ -52,11 +74,10 @@ public struct BatchBackupSheet: View {
                             .foregroundColor(.blue)
                     }
 
-                    let totalData = apps.reduce(0) { $0 + $1.dataSizeBytes }
                     HStack {
-                        Label("Estimated Data", systemImage: "folder.fill")
+                        Label("Estimated Size", systemImage: "folder.fill")
                         Spacer()
-                        Text(ByteCountFormatter.string(fromByteCount: totalData, countStyle: .file))
+                        Text(ByteCountFormatter.string(fromByteCount: estimatedBytes, countStyle: .file))
                             .foregroundColor(.secondary)
                     }
                 }
@@ -69,9 +90,19 @@ public struct BatchBackupSheet: View {
                                 Label(dest.title, systemImage: dest.iconName).tag(dest)
                             }
                         }
+
+                        if selectedDestination == .googleDrive && !googleDrive.isAuthenticated {
+                            Text("Google Drive is not signed in. Sign in under Settings first.")
+                                .font(.caption)
+                                .foregroundColor(.orange)
+                        } else if selectedDestination == .webdav && !webdav.isConfigured {
+                            Text("WebDAV is not configured. Configure your server in Settings first.")
+                                .font(.caption)
+                                .foregroundColor(.orange)
+                        }
                     }
 
-                    Section(header: Text("Backup Mode")) {
+                    Section(header: Text("Backup Mode & Components")) {
                         Picker("Mode", selection: $selectedMode) {
                             ForEach(BackupMode.allCases) { mode in
                                 Text(mode.title).tag(mode)
@@ -79,7 +110,13 @@ public struct BatchBackupSheet: View {
                         }
                         .pickerStyle(SegmentedPickerStyle())
 
+                        Toggle("Include Shared App Groups", isOn: $includeAppGroups)
+                        Toggle("Include Keychain & Logins", isOn: $includeKeychain)
                         Toggle("Include Caches", isOn: $includeCaches)
+                        Toggle("Encrypt with AES-256-GCM", isOn: $enableEncryption)
+                        if enableEncryption {
+                            SecureField("Batch Encryption Password", text: $encryptionPassword)
+                        }
                     }
                 }
 
@@ -188,7 +225,8 @@ public struct BatchBackupSheet: View {
                             }
                             .padding(.vertical, 6)
                         }
-                        .listRowBackground(Color.blue)
+                        .disabled(isStartDisabled)
+                        .listRowBackground(isStartDisabled ? Color.gray : Color.blue)
                     }
                 }
             }
@@ -222,11 +260,18 @@ public struct BatchBackupSheet: View {
         results.removeAll()
         currentProgress = 0.0
 
+        let password = enableEncryption ? encryptionPassword : nil
+        let retentionLimit = SettingsViewModel.savedMaxBackupsPerApp
+
         batchTask = Task.detached(priority: .userInitiated) {
             let total = self.apps.count
+            var wasCancelled = false
 
             for (idx, target) in self.apps.enumerated() {
-                if Task.isCancelled { break }
+                if Task.isCancelled {
+                    wasCancelled = true
+                    break
+                }
 
                 await MainActor.run {
                     self.currentAppIndex = idx
@@ -241,6 +286,9 @@ public struct BatchBackupSheet: View {
                             for: target,
                             mode: self.selectedMode,
                             includeCaches: self.includeCaches,
+                            includeKeychain: self.includeKeychain,
+                            includeAppGroups: self.includeAppGroups,
+                            encryptionPassword: password,
                             note: "Batch Backup"
                         ) { p in
                             Task { @MainActor in
@@ -248,37 +296,35 @@ public struct BatchBackupSheet: View {
                             }
                         }
                     } else if self.selectedDestination == .webdav {
-                        let safeName = target.name.components(separatedBy: CharacterSet.alphanumerics.inverted).joined()
-                        let timestamp = Int(Date().timeIntervalSince1970)
-                        let archiveName = "\(safeName)_\(target.bundleIdentifier)_\(timestamp).adbk"
-
-                        var uploadData = Data()
-                        _ = try await StreamingArchiveEngine.shared.streamBackup(
+                        _ = try await BackupEngine.shared.createWebDAVStreamingBackup(
                             for: target,
                             mode: self.selectedMode,
                             includeCaches: self.includeCaches,
-                            note: "Batch Backup",
-                            onProgress: { p in
-                                Task { @MainActor in
-                                    self.statusLog = p.statusDetail
-                                }
-                            },
-                            onCompressedChunk: { chunk in
-                                uploadData.append(chunk)
-                            }
-                        )
-
-                        try await WebDAVService.shared.upload(data: uploadData, remoteFileName: archiveName)
-                    } else {
-                        _ = try await BackupEngine.shared.createStreamingBackup(
-                            for: target,
-                            mode: self.selectedMode,
-                            includeCaches: self.includeCaches,
+                            includeKeychain: self.includeKeychain,
+                            includeAppGroups: self.includeAppGroups,
+                            encryptionPassword: password,
                             note: "Batch Backup"
                         ) { p in
                             Task { @MainActor in
                                 self.statusLog = p.statusDetail
                             }
+                        }
+                    } else {
+                        _ = try await BackupEngine.shared.createStreamingBackup(
+                            for: target,
+                            mode: self.selectedMode,
+                            includeCaches: self.includeCaches,
+                            includeKeychain: self.includeKeychain,
+                            includeAppGroups: self.includeAppGroups,
+                            encryptionPassword: password,
+                            note: "Batch Backup"
+                        ) { p in
+                            Task { @MainActor in
+                                self.statusLog = p.statusDetail
+                            }
+                        }
+                        if retentionLimit > 0 {
+                            BackupEngine.shared.pruneOldBackups(for: target.bundleIdentifier, keepNewest: retentionLimit)
                         }
                     }
 
@@ -291,7 +337,6 @@ public struct BatchBackupSheet: View {
                         ))
                     }
                 } catch {
-                    // Gracefully record failure and continue to next app in queue
                     await MainActor.run {
                         self.results.append(BatchAppResult(
                             appName: target.name,
@@ -304,14 +349,18 @@ public struct BatchBackupSheet: View {
                 }
             }
 
+            if Task.isCancelled {
+                wasCancelled = true
+            }
+
+            let cancelledFinal = wasCancelled
             await MainActor.run {
                 self.currentProgress = 1.0
                 self.isExecuting = false
                 self.isCompleted = true
                 self.backupsVM.refreshBackups()
 
-                // If all succeeded with 0 errors, auto-dismiss smoothly
-                if self.failureCount == 0 && !Task.isCancelled {
+                if self.failureCount == 0 && !cancelledFinal {
                     DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
                         self.presentationMode.wrappedValue.dismiss()
                     }

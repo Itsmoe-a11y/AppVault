@@ -86,6 +86,12 @@ struct TarHeader {
         return header
     }
 
+    static func makeLongLinknameHeader(linkname: String) -> TarHeader {
+        var header = TarHeader(path: "././@LongLink", size: Int64(linkname.utf8.count + 1), typeflag: "K", mode: 0o644)
+        header.needsLongName = false
+        return header
+    }
+
     func toData() -> Data {
         var data = Data(count: 512)
         data.withUnsafeMutableBytes { (rawPtr: UnsafeMutableRawBufferPointer) in
@@ -369,11 +375,13 @@ final class TarExtractor {
     private let fileManager = FileManager.default
     private var buffer = Data()
     private var pendingLongName: String? = nil
+    private var pendingLongLinkname: String? = nil
 
     private enum State {
         case readingHeader
         case readingFileData(bytesRemaining: Int64, paddingRemaining: Int, fileHandle: FileHandle, destPath: String, mode: mode_t)
-        case readingLongName(bytesRemaining: Int64, paddingRemaining: Int, accumulated: Data)
+        case readingLongName(bytesRemaining: Int64, paddingRemaining: Int, accumulated: Data, isLinkTarget: Bool)
+        case skippingPayload(bytesRemaining: Int64, paddingRemaining: Int)
         case completed
     }
 
@@ -438,7 +446,7 @@ final class TarExtractor {
                     state = .readingFileData(bytesRemaining: bytesRemaining, paddingRemaining: paddingRemaining, fileHandle: handle, destPath: destPath, mode: mode)
                 }
 
-            case .readingLongName(var bytesRemaining, var paddingRemaining, var accumulated):
+            case .readingLongName(var bytesRemaining, var paddingRemaining, var accumulated, let isLinkTarget):
                 if bytesRemaining > 0 {
                     let toRead = min(Int64(buffer.count), bytesRemaining)
                     accumulated.append(buffer.prefix(Int(toRead)))
@@ -457,13 +465,39 @@ final class TarExtractor {
                         if let nullIndex = accumulated.firstIndex(of: 0) {
                             accumulated = accumulated.prefix(upTo: nullIndex)
                         }
-                        self.pendingLongName = String(data: accumulated, encoding: .utf8)
+                        let decoded = String(data: accumulated, encoding: .utf8)
+                        if isLinkTarget {
+                            self.pendingLongLinkname = decoded
+                        } else {
+                            self.pendingLongName = decoded
+                        }
                         state = .readingHeader
                     } else {
-                        state = .readingLongName(bytesRemaining: 0, paddingRemaining: paddingRemaining, accumulated: accumulated)
+                        state = .readingLongName(bytesRemaining: 0, paddingRemaining: paddingRemaining, accumulated: accumulated, isLinkTarget: isLinkTarget)
                     }
                 } else {
-                    state = .readingLongName(bytesRemaining: bytesRemaining, paddingRemaining: paddingRemaining, accumulated: accumulated)
+                    state = .readingLongName(bytesRemaining: bytesRemaining, paddingRemaining: paddingRemaining, accumulated: accumulated, isLinkTarget: isLinkTarget)
+                }
+
+            case .skippingPayload(var bytesRemaining, var paddingRemaining):
+                if bytesRemaining > 0 {
+                    let toSkip = min(Int64(buffer.count), bytesRemaining)
+                    buffer.removeFirst(Int(toSkip))
+                    bytesRemaining -= toSkip
+                }
+                if bytesRemaining == 0 {
+                    if paddingRemaining > 0 {
+                        let toPadSkip = min(buffer.count, paddingRemaining)
+                        buffer.removeFirst(toPadSkip)
+                        paddingRemaining -= toPadSkip
+                    }
+                    if paddingRemaining == 0 {
+                        state = .readingHeader
+                    } else {
+                        state = .skippingPayload(bytesRemaining: 0, paddingRemaining: paddingRemaining)
+                    }
+                } else {
+                    state = .skippingPayload(bytesRemaining: bytesRemaining, paddingRemaining: paddingRemaining)
                 }
 
             case .completed:
@@ -548,7 +582,33 @@ final class TarExtractor {
             rawResolvedPath = name
         }
 
-        var cleanPath = rawResolvedPath.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        // 5. Handle metadata-only tar entry types before path resolution
+        if typeflag == "L" || typeflag == "K" {
+            let pad = (512 - (Int(size) % 512)) % 512
+            state = .readingLongName(bytesRemaining: size, paddingRemaining: pad, accumulated: Data(), isLinkTarget: typeflag == "K")
+            return
+        }
+
+        if typeflag == "x" || typeflag == "g" || typeflag == "X" {
+            // Safely skip PAX extended header payload instead of writing metadata as a regular file
+            let pad = (512 - (Int(size) % 512)) % 512
+            if size > 0 || pad > 0 {
+                state = .skippingPayload(bytesRemaining: size, paddingRemaining: pad)
+            } else {
+                state = .readingHeader
+            }
+            return
+        }
+
+        let resolvedLinkname: String
+        if let longLink = self.pendingLongLinkname {
+            resolvedLinkname = longLink
+            self.pendingLongLinkname = nil
+        } else {
+            resolvedLinkname = linkname
+        }
+
+        let cleanPath = rawResolvedPath.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
 
         // Security check: Guard against Tar Slip path traversal attacks
         let components = cleanPath.components(separatedBy: "/")
@@ -558,41 +618,68 @@ final class TarExtractor {
 
         guard !cleanPath.isEmpty else { return }
 
-        let destURL = destinationDir.appendingPathComponent(cleanPath)
+        let canonicalRoot = destinationDir.resolvingSymlinksInPath().standardizedFileURL
+        let rootBoundary = canonicalRoot.path.hasSuffix("/") ? canonicalRoot.path : canonicalRoot.path + "/"
+        let destURL = canonicalRoot.appendingPathComponent(cleanPath).standardizedFileURL
         let destPath = destURL.path
-        guard destPath.hasPrefix(destinationDir.path) else {
+        guard destPath == canonicalRoot.path || destPath.hasPrefix(rootBoundary) else {
             throw NSError(domain: "AppVault.Tar", code: 403, userInfo: [NSLocalizedDescriptionKey: "Security violation: Target escapes destination directory: \(cleanPath)"])
         }
 
-        // 5. Dispatch based on typeflag
-        if typeflag == "L" {
-            // GNU Long Name header
-            let pad = (512 - (Int(size) % 512)) % 512
-            state = .readingLongName(bytesRemaining: size, paddingRemaining: pad, accumulated: Data())
-            return
-        }
-
-        if typeflag == "5" || cleanPath.hasSuffix("/") {
-            // Directory
+        if typeflag == "5" || rawResolvedPath.hasSuffix("/") {
             try fileManager.createDirectory(at: destURL, withIntermediateDirectories: true)
+            let realDir = destURL.resolvingSymlinksInPath().standardizedFileURL.path
+            guard realDir == canonicalRoot.path || realDir.hasPrefix(rootBoundary) else {
+                throw NSError(domain: "AppVault.Tar", code: 403, userInfo: [NSLocalizedDescriptionKey: "Security violation: Directory resolves outside extraction root."])
+            }
             chmod(destPath, 0o755)
             state = .readingHeader
             return
         }
 
         if typeflag == "2" {
-            // Symbolic link
+            // Symbolic link: verify link target cannot escape destinationDir
             let parentURL = destURL.deletingLastPathComponent()
             try fileManager.createDirectory(at: parentURL, withIntermediateDirectories: true)
+            let resolvedParent = parentURL.resolvingSymlinksInPath().standardizedFileURL
+            guard resolvedParent.path == canonicalRoot.path || resolvedParent.path.hasPrefix(rootBoundary) else {
+                throw NSError(domain: "AppVault.Tar", code: 403, userInfo: [NSLocalizedDescriptionKey: "Security violation: Symlink parent escapes extraction root."])
+            }
+
+            let candidateTarget: URL
+            if resolvedLinkname.hasPrefix("/") {
+                candidateTarget = URL(fileURLWithPath: resolvedLinkname).standardizedFileURL
+            } else {
+                candidateTarget = resolvedParent.appendingPathComponent(resolvedLinkname).standardizedFileURL
+            }
+            guard candidateTarget.path == canonicalRoot.path || candidateTarget.path.hasPrefix(rootBoundary) else {
+                throw NSError(domain: "AppVault.Tar", code: 403, userInfo: [NSLocalizedDescriptionKey: "Security violation: Symlink target escapes extraction root: \(resolvedLinkname)"])
+            }
+
             unlink(destPath)
-            symlink(linkname, destPath)
+            symlink(resolvedLinkname, destPath)
             state = .readingHeader
             return
         }
 
-        // Regular file ('0' or '\0')
+        // Skip unsupported non-regular entry types (hard links, block/char devices, FIFOs)
+        if typeflag != "0" && typeflag != "\0" {
+            let pad = (512 - (Int(size) % 512)) % 512
+            if size > 0 || pad > 0 {
+                state = .skippingPayload(bytesRemaining: size, paddingRemaining: pad)
+            } else {
+                state = .readingHeader
+            }
+            return
+        }
+
+        // Regular file ('0' or '\0') — verify resolved parent cannot escape through an existing symlink
         let parentURL = destURL.deletingLastPathComponent()
         try fileManager.createDirectory(at: parentURL, withIntermediateDirectories: true)
+        let resolvedParent = parentURL.resolvingSymlinksInPath().standardizedFileURL
+        guard resolvedParent.path == canonicalRoot.path || resolvedParent.path.hasPrefix(rootBoundary) else {
+            throw NSError(domain: "AppVault.Tar", code: 403, userInfo: [NSLocalizedDescriptionKey: "Security violation: File parent resolves outside extraction root."])
+        }
         try? fileManager.removeItem(at: destURL)
         unlink(destPath)
         fileManager.createFile(atPath: destPath, contents: nil, attributes: nil)
@@ -645,6 +732,18 @@ public final class StreamingArchiveEngine {
         to gzip: GzipStreamWriter
     ) async throws {
         let header = TarHeader(path: path, size: size, typeflag: typeflag, mode: mode, linkname: linkname)
+        if typeflag == "2" && linkname.utf8.count > 100 {
+            let longLinkTargetHeader = TarHeader.makeLongLinknameHeader(linkname: linkname)
+            try await gzip.write(data: longLinkTargetHeader.toData())
+            var linkBytes = Array(linkname.utf8)
+            linkBytes.append(0)
+            let linkData = Data(linkBytes)
+            try await gzip.write(data: linkData)
+            let pad = (512 - (linkData.count % 512)) % 512
+            if pad > 0 {
+                try await gzip.write(data: Data(count: pad))
+            }
+        }
         if header.needsLongName {
             let longLinkHeader = TarHeader.makeLongNameHeader(path: path)
             try await gzip.write(data: longLinkHeader.toData())
@@ -906,7 +1005,8 @@ public final class StreamingArchiveEngine {
             let cleanSubPath = subPath.hasPrefix("/") ? String(subPath.dropFirst()) : subPath
 
             if !includeCaches {
-                if cleanSubPath.contains("Caches/") || cleanSubPath.contains("tmp/") || cleanSubPath.hasSuffix("/Caches") {
+                let pathParts = cleanSubPath.components(separatedBy: "/")
+                if pathParts.contains("Caches") || pathParts.contains("tmp") {
                     enumerator.skipDescendants()
                     continue
                 }

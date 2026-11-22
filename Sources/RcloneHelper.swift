@@ -248,9 +248,23 @@ public final class RcloneHelper: ObservableObject {
     public func stopWebDAVBridge() {
         if let pid = bridgePid {
             kill(pid, SIGTERM)
+            var status: Int32 = 0
+            // Reap our own daemon PID cleanly without killing unrelated rclone instances
+            var reaped = false
+            for _ in 0..<10 {
+                let res = waitpid(pid, &status, WNOHANG)
+                if res == pid || res == -1 {
+                    reaped = true
+                    break
+                }
+                usleep(50_000)
+            }
+            if !reaped {
+                kill(pid, SIGKILL)
+                waitpid(pid, &status, 0)
+            }
             self.bridgePid = nil
         }
-        PosixHelper.shared.terminateApp(named: "rclone")
         self.isBridgeRunning = false
         statusMessage = "Rclone WebDAV bridge stopped."
     }

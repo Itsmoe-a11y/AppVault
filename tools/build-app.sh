@@ -19,7 +19,7 @@ fi
 if command -v xcodegen >/dev/null 2>&1; then
     echo "==> Generating Xcode project with xcodegen..."
     xcodegen generate
-    
+
     echo "==> Compiling with xcodebuild..."
     xcodebuild build \
         -project AppVault.xcodeproj \
@@ -33,29 +33,29 @@ if command -v xcodegen >/dev/null 2>&1; then
         AD_HOC_CODE_SIGNING_ALLOWED=YES
 
     APP_PATH=$(find "$BUILD_DIR/DerivedData/Build/Products/Release-iphoneos" -name "AppVault.app" -type d | head -n 1)
+    echo "==> Staging IPA Payload..."
+    mkdir -p "$BUILD_DIR/Payload"
+    cp -R "$APP_PATH" "$BUILD_DIR/Payload/AppVault.app"
 else
     echo "==> Compiling directly with swiftc for iOS arm64..."
     SDK_PATH=$(xcrun --sdk iphoneos --show-sdk-path)
     mkdir -p "$BUILD_DIR/Payload/AppVault.app"
     APP_PATH="$BUILD_DIR/Payload/AppVault.app"
 
-    SWIFT_FILES=$(find "$ROOT_DIR/Sources" -name "*.swift")
+    mapfile -t SWIFT_FILES < <(find "$ROOT_DIR/Sources" -name "*.swift" | sort)
 
     swiftc \
         -target arm64-apple-ios15.0 \
         -sdk "$SDK_PATH" \
         -O \
-        -import-objc-header /dev/null 2>/dev/null || true \
-        $SWIFT_FILES \
+        -lsqlite3 \
+        -lz \
+        "${SWIFT_FILES[@]}" \
         -emit-executable \
         -o "$APP_PATH/AppVault"
 
     cp "$ROOT_DIR/Resources/Info.plist" "$APP_PATH/Info.plist"
 fi
-
-echo "==> Staging IPA Payload..."
-mkdir -p "$BUILD_DIR/Payload"
-cp -R "$APP_PATH" "$BUILD_DIR/Payload/AppVault.app"
 
 echo "==> Signing with TrollStore entitlements..."
 if command -v ldid >/dev/null 2>&1; then

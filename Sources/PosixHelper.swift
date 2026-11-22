@@ -228,12 +228,13 @@ public final class PosixHelper {
     // MARK: - TrollStore URL Scheme Trigger
     @MainActor
     public func installViaTrollStore(at url: URL) {
-        guard let encoded = url.path.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed),
+        // TrollStore expects a full file:// URL percent-encoded as a query value
+        var allowed = CharacterSet.alphanumerics
+        allowed.insert(charactersIn: "-._~")
+        guard let encoded = url.absoluteString.addingPercentEncoding(withAllowedCharacters: allowed),
               let trollStoreURL = URL(string: "apple-magnifier://install?url=\(encoded)") else {
             return
         }
-        if UIApplication.shared.canOpenURL(trollStoreURL) {
-            UIApplication.shared.open(trollStoreURL, options: [:], completionHandler: nil)
-        }
+        UIApplication.shared.open(trollStoreURL, options: [:], completionHandler: nil)
     }
 }

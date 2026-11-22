@@ -5,12 +5,13 @@ public struct BackupDetailSheet: View {
     @Environment(\.presentationMode) var presentationMode
     @EnvironmentObject var backupsVM: BackupsViewModel
     @ObservedObject var googleDrive = GoogleDriveService.shared
+    @ObservedObject var webdav = WebDAVService.shared
 
-    @State private var selectedMode: BackupMode = .dataOnly
+    @State private var selectedMode: BackupMode
     @State private var selectedDestination: BackupDestination = .local
     @State private var includeKeychain: Bool = true
     @State private var includeAppGroups: Bool = true
-    @State private var includeCaches: Bool = false
+    @State private var includeCaches: Bool
     @State private var note: String = ""
     @State private var enableEncryption: Bool = false
     @State private var encryptionPassword: String = ""
@@ -25,6 +26,34 @@ public struct BackupDetailSheet: View {
     public init(app: InstalledApp) {
         self.app = app
         _currentApp = State(initialValue: app)
+        _selectedMode = State(initialValue: SettingsViewModel.savedDefaultBackupMode)
+        _includeCaches = State(initialValue: SettingsViewModel.savedDefaultIncludeCaches)
+    }
+
+    private var isActionDisabled: Bool {
+        if selectedDestination == .googleDrive && !googleDrive.isAuthenticated { return true }
+        if selectedDestination == .webdav && !webdav.isConfigured { return true }
+        if enableEncryption && encryptionPassword.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return true }
+        return false
+    }
+
+    private var actionButtonTitle: String {
+        switch selectedDestination {
+        case .googleDrive:
+            return enableEncryption ? "Encrypt & Upload to Google Drive" : "Stream Direct to Google Drive"
+        case .webdav:
+            return enableEncryption ? "Encrypt & Upload to WebDAV" : "Stream Backup to WebDAV"
+        case .local:
+            return enableEncryption ? "Create Encrypted Backup" : "Create Streaming Backup"
+        }
+    }
+
+    private var actionButtonIcon: String {
+        switch selectedDestination {
+        case .googleDrive: return "icloud.and.arrow.up.fill"
+        case .webdav: return "server.rack"
+        case .local: return enableEncryption ? "lock.doc.fill" : "arrow.down.doc.fill"
+        }
     }
 
     public var body: some View {
@@ -105,7 +134,7 @@ public struct BackupDetailSheet: View {
                 }
 
                 if !isExecuting && completedRecord == nil {
-                    // Section 3: Backup Type (100% crash-proof on iOS 16)
+                    // Section 3: Backup Type
                     Section(header: Text("Backup Type")) {
                         Picker("Backup Type", selection: $selectedMode) {
                             Text("Data Only").tag(BackupMode.dataOnly)
@@ -135,11 +164,11 @@ public struct BackupDetailSheet: View {
                         .pickerStyle(MenuPickerStyle())
 
                         if selectedDestination == .webdav {
-                            if WebDAVService.shared.isConfigured {
+                            if webdav.isConfigured {
                                 HStack {
                                     Image(systemName: "checkmark.circle.fill")
                                         .foregroundColor(.green)
-                                    Text("Connected to \(WebDAVService.shared.serverURL)")
+                                    Text("Connected to \(webdav.serverURL)")
                                         .font(.caption)
                                         .foregroundColor(.secondary)
                                 }
@@ -159,7 +188,9 @@ public struct BackupDetailSheet: View {
                                         .font(.caption)
                                         .foregroundColor(.secondary)
                                 }
-                                Text("Archive will be compressed on-the-fly and streamed directly to Google Drive. Uses 0 MB of local storage.")
+                                Text(enableEncryption
+                                     ? "Archive will be encrypted with AES-256-GCM before uploading to \(googleDrive.targetFolderName)."
+                                     : "Archive will be compressed on-the-fly and streamed directly to \(googleDrive.targetFolderName). Uses 0 MB of local storage.")
                                     .font(.caption2)
                                     .foregroundColor(.blue)
                             } else {
@@ -170,7 +201,7 @@ public struct BackupDetailSheet: View {
 
                                     Button(action: { googleDrive.signIn() }) {
                                         HStack {
-                                            Image(systemName: "link.badge.plus")
+                                            Image(systemName: "person.badge.key.fill")
                                             Text("Sign In with Google")
                                         }
                                         .font(.subheadline)
@@ -197,7 +228,12 @@ public struct BackupDetailSheet: View {
 
                         Toggle("Encrypt with AES-256-GCM", isOn: $enableEncryption)
                         if enableEncryption {
-                            SecureField("Set Backup Password", text: $encryptionPassword)
+                            SecureField("Set Backup Password (required)", text: $encryptionPassword)
+                            if encryptionPassword.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                                Text("Enter a password to encrypt this archive with chunked AES-256-GCM.")
+                                    .font(.caption2)
+                                    .foregroundColor(.orange)
+                            }
                         }
                     }
                 }
@@ -231,7 +267,7 @@ public struct BackupDetailSheet: View {
                                 VStack(alignment: .leading, spacing: 2) {
                                     Text("Backup Created Successfully!")
                                         .font(.headline)
-                                    Text("Size: \(record.formattedSize) \u{2022} Mode: \(record.mode.title)")
+                                    Text("Size: \(record.formattedSize) \u{2022} Mode: \(record.mode.title)\(record.isEncrypted ? " \u{2022} Encrypted" : "")")
                                         .font(.caption)
                                         .foregroundColor(.secondary)
                                 }
@@ -283,18 +319,15 @@ public struct BackupDetailSheet: View {
                         Button(action: startBackup) {
                             HStack {
                                 Spacer()
-                                Label(
-                                    selectedDestination == .googleDrive ? "Stream Direct to Google Drive" : "Create Streaming Backup",
-                                    systemImage: selectedDestination == .googleDrive ? "icloud.and.arrow.up.fill" : "arrow.down.doc.fill"
-                                )
-                                .font(.headline)
-                                .foregroundColor(.white)
+                                Label(actionButtonTitle, systemImage: actionButtonIcon)
+                                    .font(.headline)
+                                    .foregroundColor(.white)
                                 Spacer()
                             }
                             .padding(.vertical, 6)
                         }
-                        .disabled(selectedDestination == .googleDrive && !googleDrive.isAuthenticated)
-                        .listRowBackground(selectedDestination == .googleDrive && !googleDrive.isAuthenticated ? Color.gray : Color.blue)
+                        .disabled(isActionDisabled)
+                        .listRowBackground(isActionDisabled ? Color.gray : Color.blue)
                     }
                 }
             }
@@ -331,6 +364,9 @@ public struct BackupDetailSheet: View {
         completedRecord = nil
         currentProgress = OperationProgress(stage: "Initializing", fractionCompleted: 0.0, statusDetail: "Preparing stream...")
 
+        let password = enableEncryption ? encryptionPassword : nil
+        let retentionLimit = SettingsViewModel.savedMaxBackupsPerApp
+
         Task.detached(priority: .userInitiated) {
             do {
                 if self.selectedDestination == .googleDrive {
@@ -340,6 +376,7 @@ public struct BackupDetailSheet: View {
                         includeCaches: self.includeCaches,
                         includeKeychain: self.includeKeychain,
                         includeAppGroups: self.includeAppGroups,
+                        encryptionPassword: password,
                         note: self.note
                     ) { progress in
                         Task { @MainActor in
@@ -353,41 +390,13 @@ public struct BackupDetailSheet: View {
                         self.backupsVM.refreshCloudBackups()
                     }
                 } else if self.selectedDestination == .webdav {
-                    let safeName = self.currentApp.name.components(separatedBy: CharacterSet.alphanumerics.inverted).joined()
-                    let timestamp = Int(Date().timeIntervalSince1970)
-                    let archiveName = "\(safeName)_\(self.currentApp.bundleIdentifier)_\(timestamp).adbk"
-
-                    var uploadData = Data()
-                    let record = try await StreamingArchiveEngine.shared.streamBackup(
+                    let record = try await BackupEngine.shared.createWebDAVStreamingBackup(
                         for: self.currentApp,
                         mode: self.selectedMode,
                         includeCaches: self.includeCaches,
                         includeKeychain: self.includeKeychain,
                         includeAppGroups: self.includeAppGroups,
-                        note: self.note,
-                        onProgress: { p in
-                            Task { @MainActor in
-                                self.currentProgress = p
-                            }
-                        },
-                        onCompressedChunk: { chunk in
-                            uploadData.append(chunk)
-                        }
-                    )
-
-                    try await WebDAVService.shared.upload(data: uploadData, remoteFileName: archiveName)
-
-                    await MainActor.run {
-                        self.isExecuting = false
-                        self.completedRecord = record
-                    }
-                } else {
-                    let record = try await BackupEngine.shared.createStreamingBackup(
-                        for: self.currentApp,
-                        mode: self.selectedMode,
-                        includeCaches: self.includeCaches,
-                        includeKeychain: self.includeKeychain,
-                        includeAppGroups: self.includeAppGroups,
+                        encryptionPassword: password,
                         note: self.note
                     ) { progress in
                         Task { @MainActor in
@@ -398,7 +407,35 @@ public struct BackupDetailSheet: View {
                     await MainActor.run {
                         self.isExecuting = false
                         self.completedRecord = record
-                        self.backupsVM.backups.insert(record, at: 0)
+                        self.backupsVM.refreshWebDAVBackups()
+                    }
+                } else {
+                    let record = try await BackupEngine.shared.createStreamingBackup(
+                        for: self.currentApp,
+                        mode: self.selectedMode,
+                        includeCaches: self.includeCaches,
+                        includeKeychain: self.includeKeychain,
+                        includeAppGroups: self.includeAppGroups,
+                        encryptionPassword: password,
+                        note: self.note
+                    ) { progress in
+                        Task { @MainActor in
+                            self.currentProgress = progress
+                        }
+                    }
+
+                    if retentionLimit > 0 {
+                        BackupEngine.shared.pruneOldBackups(for: self.currentApp.bundleIdentifier, keepNewest: retentionLimit)
+                    }
+
+                    await MainActor.run {
+                        self.isExecuting = false
+                        self.completedRecord = record
+                        if retentionLimit > 0 {
+                            self.backupsVM.refreshLocalBackups()
+                        } else {
+                            self.backupsVM.backups.insert(record, at: 0)
+                        }
                     }
                 }
             } catch {

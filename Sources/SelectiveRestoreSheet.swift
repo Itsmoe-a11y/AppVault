@@ -1,21 +1,5 @@
 import SwiftUI
 
-// MARK: - Selective Restore Options Model
-public struct SelectiveRestoreOptions {
-    public var restoreDocuments: Bool = true
-    public var restorePreferences: Bool = true
-    public var restoreAppSupport: Bool = true
-    public var restoreAppGroups: Bool = true
-    public var restoreKeychain: Bool = true
-    public var restoreCaches: Bool = false
-
-    public init() {}
-
-    public var hasAnySelected: Bool {
-        restoreDocuments || restorePreferences || restoreAppSupport || restoreAppGroups || restoreKeychain || restoreCaches
-    }
-}
-
 // MARK: - Selective Restore Sheet
 public struct SelectiveRestoreSheet: View {
     public let record: BackupRecord
@@ -24,8 +8,10 @@ public struct SelectiveRestoreSheet: View {
 
     @Environment(\.presentationMode) var presentationMode
     @State private var options = SelectiveRestoreOptions()
+    @State private var decryptionPassword: String = ""
+    @State private var needsPasswordPrompt: Bool = false
 
-    // In-sheet execution state (100% collision-free on iOS 16)
+    // In-sheet execution state
     @State private var isExecuting: Bool = false
     @State private var currentProgress: OperationProgress? = nil
     @State private var executionError: String? = nil
@@ -41,15 +27,27 @@ public struct SelectiveRestoreSheet: View {
         self.onComplete = onComplete
     }
 
+    private var requiresPassword: Bool {
+        record.isEncrypted || needsPasswordPrompt
+    }
+
+    private var canStartRestore: Bool {
+        guard options.hasAnySelected else { return false }
+        if requiresPassword && decryptionPassword.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return false
+        }
+        return true
+    }
+
     public var body: some View {
         NavigationView {
             Form {
                 // Section 1: Target Info
                 Section(header: Text("Target Application")) {
                     HStack(spacing: 14) {
-                        Image(systemName: record.mode == .full ? "shippingbox.fill" : "internaldrive.fill")
+                        Image(systemName: record.isEncrypted ? "lock.shield.fill" : (record.mode == .full ? "shippingbox.fill" : "internaldrive.fill"))
                             .font(.system(size: 28))
-                            .foregroundColor(record.mode == .full ? .purple : .blue)
+                            .foregroundColor(record.isEncrypted ? .orange : (record.mode == .full ? .purple : .blue))
 
                         VStack(alignment: .leading, spacing: 2) {
                             Text(record.appName)
@@ -65,7 +63,7 @@ public struct SelectiveRestoreSheet: View {
                     .padding(.vertical, 4)
                 }
 
-                // Section 2: In-Sheet Execution Status (if executing or completed)
+                // Section 2: In-Sheet Execution Status
                 if isExecuting || isCompleted || executionError != nil {
                     Section(header: Text("Restoration Status")) {
                         if let error = executionError {
@@ -133,7 +131,27 @@ public struct SelectiveRestoreSheet: View {
                 }
 
                 if !isExecuting && !isCompleted {
-                    // Section 3: Component Selection Toggles
+                    // Section 2.5: AES-256-GCM Password Input (when encrypted)
+                    if requiresPassword {
+                        Section(header: Text("AES-256-GCM Decryption")) {
+                            SecureField("Enter Backup Password", text: $decryptionPassword)
+                            Text("This archive is encrypted. Enter the password used when creating the backup.")
+                                .font(.caption2)
+                                .foregroundColor(.secondary)
+                        }
+                    }
+
+                    // Section 3: Safety Snapshot
+                    Section(header: Text("Safety Protection")) {
+                        Toggle(isOn: $options.createSafetySnapshot) {
+                            Label("Pre-Restore Safety Snapshot", systemImage: "shield.lefthalf.filled")
+                        }
+                        Text("Automatically snapshots the app's current local data before overwriting, so you can always roll back.")
+                            .font(.caption2)
+                            .foregroundColor(.secondary)
+                    }
+
+                    // Section 4: Component Selection Toggles
                     Section(header: HStack {
                         Text("Select Components to Restore")
                         Spacer()
@@ -161,9 +179,12 @@ public struct SelectiveRestoreSheet: View {
                             Label("Databases & App State", systemImage: "cylinder.split.1x2.fill")
                         }
 
-                        if !record.appGroupIDs.isEmpty {
+                        if !record.appGroupIDs.isEmpty || record.isEncrypted {
                             Toggle(isOn: $options.restoreAppGroups) {
-                                Label("Shared App Groups (\(record.appGroupIDs.count))", systemImage: "rectangle.3.group.fill")
+                                Label(
+                                    record.appGroupIDs.isEmpty ? "Shared App Groups" : "Shared App Groups (\(record.appGroupIDs.count))",
+                                    systemImage: "rectangle.3.group.fill"
+                                )
                             }
                         }
 
@@ -176,23 +197,28 @@ public struct SelectiveRestoreSheet: View {
                         }
                     }
 
-                    // Section 4: Restore Action Button
+                    // Section 5: Restore Action Button
                     Section {
                         Button(action: startRestoreProcess) {
                             HStack {
                                 Spacer()
-                                Label("Restore Selected Data", systemImage: "arrow.counterclockwise.circle.fill")
+                                Label(requiresPassword ? "Decrypt & Restore Data" : "Restore Selected Data", systemImage: "arrow.counterclockwise.circle.fill")
                                     .font(.system(size: 15, weight: .bold))
                                     .foregroundColor(.white)
                                 Spacer()
                             }
                             .padding(.vertical, 6)
                         }
-                        .disabled(!options.hasAnySelected)
-                        .listRowBackground(options.hasAnySelected ? Color.blue : Color.gray)
+                        .disabled(!canStartRestore)
+                        .listRowBackground(canStartRestore ? Color.blue : Color.gray)
 
                         if !options.hasAnySelected {
                             Text("Please select at least one component to restore.")
+                                .font(.caption2)
+                                .foregroundColor(.orange)
+                                .frame(maxWidth: .infinity, alignment: .center)
+                        } else if requiresPassword && decryptionPassword.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                            Text("Enter the decryption password to continue.")
                                 .font(.caption2)
                                 .foregroundColor(.orange)
                                 .frame(maxWidth: .infinity, alignment: .center)
@@ -223,9 +249,11 @@ public struct SelectiveRestoreSheet: View {
         isCompleted = false
         currentProgress = OperationProgress(stage: "Initializing", fractionCompleted: 0.05, statusDetail: "Preparing restoration...")
 
+        let password = decryptionPassword.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : decryptionPassword
+
         Task.detached(priority: .userInitiated) {
             do {
-                _ = try await RestoreEngine.shared.restore(from: self.archiveURL, options: self.options) { p in
+                _ = try await RestoreEngine.shared.restore(from: self.archiveURL, options: self.options, password: password) { p in
                     Task { @MainActor in
                         self.currentProgress = p
                     }
@@ -239,6 +267,9 @@ public struct SelectiveRestoreSheet: View {
             } catch {
                 await MainActor.run {
                     self.isExecuting = false
+                    if case RestoreError.passwordRequired = error {
+                        self.needsPasswordPrompt = true
+                    }
                     self.executionError = error.localizedDescription
                 }
             }

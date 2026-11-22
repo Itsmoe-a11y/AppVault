@@ -1,20 +1,61 @@
 import SwiftUI
 
+private enum BackupsActiveSheet: Identifiable {
+    case documentPicker
+    case selectiveRestore(BackupRecord)
+    case rename(BackupRecord)
+
+    var id: String {
+        switch self {
+        case .documentPicker: return "documentPicker"
+        case .selectiveRestore(let r): return "restore_\(r.id.uuidString)"
+        case .rename(let r): return "rename_\(r.id.uuidString)"
+        }
+    }
+}
+
+private enum BackupsActiveActionSheet: Identifiable {
+    case restoreCloud(GoogleDriveFile)
+    case restoreWebDAV(WebDAVFile)
+    case deleteLocal(BackupRecord)
+    case deleteCloud(GoogleDriveFile)
+    case deleteWebDAV(WebDAVFile)
+    case exportLocal(BackupRecord)
+
+    var id: String {
+        switch self {
+        case .restoreCloud(let f): return "restoreCloud_\(f.id)"
+        case .restoreWebDAV(let f): return "restoreWebDAV_\(f.id)"
+        case .deleteLocal(let r): return "deleteLocal_\(r.id.uuidString)"
+        case .deleteCloud(let f): return "deleteCloud_\(f.id)"
+        case .deleteWebDAV(let f): return "deleteWebDAV_\(f.id)"
+        case .exportLocal(let r): return "exportLocal_\(r.id.uuidString)"
+        }
+    }
+}
+
 public struct BackupsListView: View {
     @EnvironmentObject var backupsVM: BackupsViewModel
     @ObservedObject var googleDrive = GoogleDriveService.shared
+    @ObservedObject var webdav = WebDAVService.shared
 
-    @State private var showDocumentPicker = false
-    @State private var deleteTarget: BackupRecord? = nil
-    @State private var deleteCloudTarget: GoogleDriveFile? = nil
-    @State private var exportTarget: BackupRecord? = nil
+    @State private var activeSheet: BackupsActiveSheet? = nil
+    @State private var activeActionSheet: BackupsActiveActionSheet? = nil
 
     public init() {}
+
+    private var navigationTitleText: String {
+        switch backupsVM.selectedScope {
+        case .onDevice: return "Device Backups (\(backupsVM.backups.count))"
+        case .googleDrive: return "Cloud Backups (\(backupsVM.cloudBackups.count))"
+        case .webdav: return "WebDAV Backups (\(backupsVM.webdavBackups.count))"
+        }
+    }
 
     public var body: some View {
         NavigationView {
             VStack(spacing: 0) {
-                // Scope Switcher (On Device vs Google Drive)
+                // Scope Switcher (On Device vs Google Drive vs WebDAV)
                 Picker("Storage Scope", selection: $backupsVM.selectedScope) {
                     ForEach(BackupScope.allCases) { scope in
                         Text(scope.rawValue).tag(scope)
@@ -55,18 +96,21 @@ public struct BackupsListView: View {
                 }
 
                 // Scope Content
-                if backupsVM.selectedScope == .onDevice {
+                switch backupsVM.selectedScope {
+                case .onDevice:
                     onDeviceList
-                } else {
+                case .googleDrive:
                     googleDriveList
+                case .webdav:
+                    webdavList
                 }
             }
-            .navigationTitle(backupsVM.selectedScope == .onDevice ? "Device Backups (\(backupsVM.backups.count))" : "Cloud Backups (\(backupsVM.cloudBackups.count))")
+            .navigationTitle(navigationTitleText)
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .navigationBarLeading) {
                     if backupsVM.selectedScope == .onDevice {
-                        Button(action: { showDocumentPicker = true }) {
+                        Button(action: { activeSheet = .documentPicker }) {
                             Label("Import", systemImage: "square.and.arrow.down")
                         }
                     }
@@ -74,29 +118,31 @@ public struct BackupsListView: View {
 
                 ToolbarItem(placement: .navigationBarTrailing) {
                     Button(action: {
-                        if backupsVM.selectedScope == .onDevice {
-                            backupsVM.refreshLocalBackups()
-                        } else {
-                            backupsVM.refreshCloudBackups()
+                        switch backupsVM.selectedScope {
+                        case .onDevice: backupsVM.refreshLocalBackups()
+                        case .googleDrive: backupsVM.refreshCloudBackups()
+                        case .webdav: backupsVM.refreshWebDAVBackups()
                         }
                     }) {
                         Image(systemName: "arrow.clockwise")
                     }
                 }
             }
-            .sheet(isPresented: $showDocumentPicker) {
-                DocumentPicker { url in
-                    backupsVM.importArchive(from: url)
-                }
-            }
-            .sheet(item: $backupsVM.restoreConfirmationRecord) { record in
-                SelectiveRestoreSheet(record: record) {
-                    backupsVM.refreshLocalBackups()
-                }
-            }
-            .sheet(item: $backupsVM.renameTargetRecord) { target in
-                RenameBackupSheet(record: target) { newName in
-                    backupsVM.renameBackup(target, to: newName)
+            // Single consolidated .sheet modifier (prevents iOS 15 SwiftUI presentation drops)
+            .sheet(item: $activeSheet) { sheet in
+                switch sheet {
+                case .documentPicker:
+                    DocumentPicker { url in
+                        backupsVM.importArchive(from: url)
+                    }
+                case .selectiveRestore(let record):
+                    SelectiveRestoreSheet(record: record) {
+                        backupsVM.refreshLocalBackups()
+                    }
+                case .rename(let target):
+                    RenameBackupSheet(record: target) { newName in
+                        backupsVM.renameBackup(target, to: newName)
+                    }
                 }
             }
             .alert(isPresented: $backupsVM.showAlert) {
@@ -106,58 +152,81 @@ public struct BackupsListView: View {
                     dismissButton: .default(Text("OK"))
                 )
             }
-            .actionSheet(item: $backupsVM.restoreConfirmationCloudFile) { file in
-                ActionSheet(
-                    title: Text("Restore \(file.name)?"),
-                    message: Text("Download and restore this cloud archive directly into the local application container?"),
-                    buttons: [
-                        .destructive(Text("Download & Restore")) {
-                            backupsVM.startCloudRestore(file: file)
-                        },
-                        .cancel()
-                    ]
-                )
-            }
-            .actionSheet(item: $deleteTarget) { target in
-                ActionSheet(
-                    title: Text("Delete Backup?"),
-                    message: Text("Are you sure you want to permanently delete the backup archive '\(target.archiveFileName)'?"),
-                    buttons: [
-                        .destructive(Text("Delete Archive")) {
-                            backupsVM.deleteBackup(target)
-                        },
-                        .cancel()
-                    ]
-                )
-            }
-            .actionSheet(item: $deleteCloudTarget) { target in
-                ActionSheet(
-                    title: Text("Delete from Google Drive?"),
-                    message: Text("Are you sure you want to permanently delete \(target.name) from your Google Drive?"),
-                    buttons: [
-                        .destructive(Text("Delete Cloud File")) {
-                            backupsVM.deleteCloudBackup(file: target)
-                        },
-                        .cancel()
-                    ]
-                )
-            }
-            .actionSheet(item: $exportTarget) { record in
-                ActionSheet(
-                    title: Text("Export \(record.appName) Backup"),
-                    message: Text(record.archiveFileName),
-                    buttons: [
-                        .default(Text("Save to Files (iCloud / Local)")) {
-                            let url = backupsVM.fileURL(for: record)
-                            presentExportPicker(url: url)
-                        },
-                        .default(Text("Share / AirDrop")) {
-                            let url = backupsVM.fileURL(for: record)
-                            presentShareSheet(url: url)
-                        },
-                        .cancel()
-                    ]
-                )
+            // Single consolidated .actionSheet modifier (prevents iOS 15 SwiftUI actionSheet collisions)
+            .actionSheet(item: $activeActionSheet) { sheet in
+                switch sheet {
+                case .restoreCloud(let file):
+                    return ActionSheet(
+                        title: Text("Restore \(file.name)?"),
+                        message: Text("Download and restore this cloud archive directly into the local application container?"),
+                        buttons: [
+                            .destructive(Text("Download & Restore")) {
+                                backupsVM.startCloudRestore(file: file)
+                            },
+                            .cancel()
+                        ]
+                    )
+                case .restoreWebDAV(let file):
+                    return ActionSheet(
+                        title: Text("Restore \(file.name)?"),
+                        message: Text("Download and restore this WebDAV archive directly into the local application container?"),
+                        buttons: [
+                            .destructive(Text("Download & Restore")) {
+                                backupsVM.startWebDAVRestore(file: file)
+                            },
+                            .cancel()
+                        ]
+                    )
+                case .deleteLocal(let target):
+                    return ActionSheet(
+                        title: Text("Delete Backup?"),
+                        message: Text("Are you sure you want to permanently delete the backup archive '\(target.archiveFileName)'?"),
+                        buttons: [
+                            .destructive(Text("Delete Archive")) {
+                                backupsVM.deleteBackup(target)
+                            },
+                            .cancel()
+                        ]
+                    )
+                case .deleteCloud(let target):
+                    return ActionSheet(
+                        title: Text("Delete from Google Drive?"),
+                        message: Text("Are you sure you want to permanently delete \(target.name) from your Google Drive?"),
+                        buttons: [
+                            .destructive(Text("Delete Cloud File")) {
+                                backupsVM.deleteCloudBackup(file: target)
+                            },
+                            .cancel()
+                        ]
+                    )
+                case .deleteWebDAV(let target):
+                    return ActionSheet(
+                        title: Text("Delete from WebDAV?"),
+                        message: Text("Are you sure you want to permanently delete \(target.name) from your WebDAV server?"),
+                        buttons: [
+                            .destructive(Text("Delete Remote File")) {
+                                backupsVM.deleteWebDAVBackup(file: target)
+                            },
+                            .cancel()
+                        ]
+                    )
+                case .exportLocal(let record):
+                    return ActionSheet(
+                        title: Text("Export \(record.appName) Backup"),
+                        message: Text(record.archiveFileName),
+                        buttons: [
+                            .default(Text("Save to Files (iCloud / Local)")) {
+                                let url = backupsVM.fileURL(for: record)
+                                presentExportPicker(url: url)
+                            },
+                            .default(Text("Share / AirDrop")) {
+                                let url = backupsVM.fileURL(for: record)
+                                presentShareSheet(url: url)
+                            },
+                            .cancel()
+                        ]
+                    )
+                }
             }
         }
         .navigationViewStyle(StackNavigationViewStyle())
@@ -191,16 +260,19 @@ public struct BackupsListView: View {
                         BackupCardView(
                             record: record,
                             onRestore: {
-                                backupsVM.restoreConfirmationRecord = record
+                                activeSheet = .selectiveRestore(record)
+                            },
+                            onVerify: {
+                                backupsVM.verifyBackup(record)
                             },
                             onShare: {
-                                exportTarget = record
+                                activeActionSheet = .exportLocal(record)
                             },
                             onRename: {
-                                backupsVM.renameTargetRecord = record
+                                activeSheet = .rename(record)
                             },
                             onDelete: {
-                                deleteTarget = record
+                                activeActionSheet = .deleteLocal(record)
                             }
                         )
                     }
@@ -233,7 +305,7 @@ public struct BackupsListView: View {
                         .padding(.horizontal, 32)
 
                     Button(action: { googleDrive.signIn() }) {
-                        Label("Sign In with Google", systemImage: "link.badge.plus")
+                        Label("Sign In with Google", systemImage: "person.badge.key.fill")
                             .font(.headline)
                             .foregroundColor(.white)
                             .padding(.horizontal, 24)
@@ -267,14 +339,15 @@ public struct BackupsListView: View {
                     ForEach(backupsVM.cloudBackups) { file in
                         CloudBackupCardView(
                             file: file,
+                            folderName: googleDrive.targetFolderName,
                             onRestore: {
-                                backupsVM.restoreConfirmationCloudFile = file
+                                activeActionSheet = .restoreCloud(file)
                             },
                             onDownload: {
                                 backupsVM.downloadCloudBackupToLocal(file: file)
                             },
                             onDelete: {
-                                deleteCloudTarget = file
+                                activeActionSheet = .deleteCloud(file)
                             }
                         )
                     }
@@ -283,6 +356,76 @@ public struct BackupsListView: View {
                 .refreshable {
                     backupsVM.refreshCloudBackups()
                 }
+            }
+        }
+    }
+
+    // MARK: - WebDAV / NAS List
+    private var webdavList: some View {
+        Group {
+            if !webdav.isConfigured {
+                Spacer()
+                VStack(spacing: 16) {
+                    Image(systemName: "server.rack")
+                        .font(.system(size: 54))
+                        .foregroundColor(.orange)
+
+                    Text("WebDAV / NAS Not Configured")
+                        .font(.headline)
+
+                    Text("Configure your Nextcloud, Synology NAS, or local Rclone WebDAV bridge in the Settings tab to browse and restore remote backups.")
+                        .font(.subheadline)
+                        .foregroundColor(.secondary)
+                        .multilineTextAlignment(.center)
+                        .padding(.horizontal, 32)
+                }
+                Spacer()
+            } else if backupsVM.isWebDAVLoading && backupsVM.webdavBackups.isEmpty {
+                Spacer()
+                ProgressView("Fetching WebDAV backups...")
+                Spacer()
+            } else if backupsVM.webdavBackups.isEmpty {
+                Spacer()
+                VStack(spacing: 14) {
+                    Image(systemName: "externaldrive.connected.to.line.below")
+                        .font(.system(size: 52))
+                        .foregroundColor(.secondary)
+                    Text("No WebDAV Backups Found")
+                        .font(.headline)
+                    Text("Select 'WebDAV / NAS' when creating a backup, or tap refresh to scan \(webdav.serverURL).")
+                        .font(.subheadline)
+                        .foregroundColor(.secondary)
+                        .multilineTextAlignment(.center)
+                        .padding(.horizontal, 32)
+                }
+                Spacer()
+            } else {
+                List {
+                    ForEach(backupsVM.webdavBackups) { file in
+                        WebDAVBackupCardView(
+                            file: file,
+                            serverURL: webdav.serverURL,
+                            onRestore: {
+                                activeActionSheet = .restoreWebDAV(file)
+                            },
+                            onDownload: {
+                                backupsVM.downloadWebDAVBackupToLocal(file: file)
+                            },
+                            onDelete: {
+                                activeActionSheet = .deleteWebDAV(file)
+                            }
+                        )
+                    }
+                }
+                .listStyle(InsetGroupedListStyle())
+                .refreshable {
+                    backupsVM.refreshWebDAVBackups()
+                }
+            }
+        }
+        .onAppear {
+            if webdav.isConfigured && backupsVM.webdavBackups.isEmpty {
+                backupsVM.refreshWebDAVBackups()
             }
         }
     }
@@ -370,6 +513,7 @@ struct RenameBackupSheet: View {
 // MARK: - Cloud Backup Card View
 struct CloudBackupCardView: View {
     let file: GoogleDriveFile
+    let folderName: String
     let onRestore: () -> Void
     let onDownload: () -> Void
     let onDelete: () -> Void
@@ -389,7 +533,7 @@ struct CloudBackupCardView: View {
                         .font(.headline)
                         .lineLimit(1)
 
-                    Text("Google Drive \u{2022} AppVault Backups")
+                    Text("Google Drive \u{2022} \(folderName)")
                         .font(.caption2)
                         .foregroundColor(.secondary)
                 }
@@ -449,10 +593,95 @@ struct CloudBackupCardView: View {
     }
 }
 
+// MARK: - WebDAV Backup Card View
+struct WebDAVBackupCardView: View {
+    let file: WebDAVFile
+    let serverURL: String
+    let onRestore: () -> Void
+    let onDownload: () -> Void
+    let onDelete: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 12) {
+                Image(systemName: "server.rack")
+                    .font(.system(size: 24))
+                    .foregroundColor(.purple)
+                    .frame(width: 40, height: 40)
+                    .background(Color.purple.opacity(0.12))
+                    .cornerRadius(8)
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(file.name)
+                        .font(.headline)
+                        .lineLimit(1)
+
+                    Text(serverURL)
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                        .lineLimit(1)
+                }
+
+                Spacer()
+
+                Text("WebDAV")
+                    .font(.system(size: 10, weight: .bold))
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 3)
+                    .background(Color.purple.opacity(0.15))
+                    .foregroundColor(.purple)
+                    .cornerRadius(6)
+            }
+
+            HStack {
+                Text(file.formattedDate)
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+
+                Spacer()
+
+                Text(file.formattedSize)
+                    .font(.system(size: 11, weight: .bold))
+                    .foregroundColor(.secondary)
+            }
+
+            Divider()
+
+            HStack(spacing: 14) {
+                Button(action: onRestore) {
+                    Label("Restore", systemImage: "arrow.counterclockwise.circle.fill")
+                        .font(.system(size: 14, weight: .bold))
+                        .foregroundColor(.green)
+                }
+                .buttonStyle(BorderlessButtonStyle())
+
+                Spacer()
+
+                Button(action: onDownload) {
+                    Label("Download", systemImage: "arrow.down.circle")
+                        .font(.subheadline)
+                        .foregroundColor(.blue)
+                }
+                .buttonStyle(BorderlessButtonStyle())
+
+                Button(action: onDelete) {
+                    Image(systemName: "trash")
+                        .font(.subheadline)
+                        .foregroundColor(.red)
+                }
+                .buttonStyle(BorderlessButtonStyle())
+            }
+            .padding(.top, 2)
+        }
+        .padding(.vertical, 4)
+    }
+}
+
 // MARK: - Local Backup Card View
 struct BackupCardView: View {
     let record: BackupRecord
     let onRestore: () -> Void
+    let onVerify: () -> Void
     let onShare: () -> Void
     let onRename: () -> Void
     let onDelete: () -> Void
@@ -460,17 +689,24 @@ struct BackupCardView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 12) {
-                Image(systemName: record.mode == .full ? "shippingbox.fill" : "internaldrive.fill")
+                Image(systemName: record.isEncrypted ? "lock.shield.fill" : (record.mode == .full ? "shippingbox.fill" : "internaldrive.fill"))
                     .font(.system(size: 26))
-                    .foregroundColor(record.mode == .full ? .purple : .blue)
+                    .foregroundColor(record.isEncrypted ? .orange : (record.mode == .full ? .purple : .blue))
                     .frame(width: 40, height: 40)
                     .background(Color(UIColor.tertiarySystemFill))
                     .cornerRadius(8)
 
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(record.appName)
-                        .font(.headline)
-                        .lineLimit(1)
+                    HStack(spacing: 5) {
+                        Text(record.appName)
+                            .font(.headline)
+                            .lineLimit(1)
+                        if record.isEncrypted {
+                            Image(systemName: "lock.fill")
+                                .font(.caption2)
+                                .foregroundColor(.orange)
+                        }
+                    }
 
                     Text(record.archiveFileName)
                         .font(.system(size: 11, design: .monospaced))
@@ -480,12 +716,12 @@ struct BackupCardView: View {
 
                 Spacer()
 
-                Text(record.mode.title)
+                Text(record.isEncrypted ? "AES-256" : record.mode.title)
                     .font(.system(size: 10, weight: .bold))
                     .padding(.horizontal, 6)
                     .padding(.vertical, 3)
-                    .background(record.mode == .full ? Color.purple.opacity(0.15) : Color.blue.opacity(0.15))
-                    .foregroundColor(record.mode == .full ? .purple : .blue)
+                    .background(record.isEncrypted ? Color.orange.opacity(0.15) : (record.mode == .full ? Color.purple.opacity(0.15) : Color.blue.opacity(0.15)))
+                    .foregroundColor(record.isEncrypted ? .orange : (record.mode == .full ? .purple : .blue))
                     .cornerRadius(6)
             }
 
@@ -522,6 +758,13 @@ struct BackupCardView: View {
 
                 Spacer()
 
+                Button(action: onVerify) {
+                    Image(systemName: "checkmark.shield")
+                        .font(.subheadline)
+                        .foregroundColor(.teal)
+                }
+                .buttonStyle(BorderlessButtonStyle())
+
                 Button(action: onRename) {
                     Image(systemName: "pencil")
                         .font(.subheadline)
@@ -549,6 +792,9 @@ struct BackupCardView: View {
         .contextMenu {
             Button(action: onRestore) {
                 Label("Restore Backup", systemImage: "arrow.counterclockwise")
+            }
+            Button(action: onVerify) {
+                Label("Verify Integrity (SHA-256)", systemImage: "checkmark.shield")
             }
             Button(action: onRename) {
                 Label("Rename Archive", systemImage: "pencil")

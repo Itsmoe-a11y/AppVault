@@ -1,22 +1,43 @@
 import SwiftUI
 
+private enum SettingsActiveSheet: Identifiable {
+    case googleGuide
+    case rcloneConf
+
+    var id: String {
+        switch self {
+        case .googleGuide: return "googleGuide"
+        case .rcloneConf: return "rcloneConf"
+        }
+    }
+}
+
 public struct SettingsView: View {
     @EnvironmentObject var settingsVM: SettingsViewModel
     @ObservedObject var googleDrive = GoogleDriveService.shared
     @ObservedObject var webServer = LocalWebServer.shared
     @ObservedObject var webdav = WebDAVService.shared
     @ObservedObject var rclone = RcloneHelper.shared
+
     @State private var showAdvancedOAuth = false
-    @State private var showGoogleGuide = false
-    @State private var showRcloneConfSheet = false
+    @State private var activeSheet: SettingsActiveSheet? = nil
     @State private var directTokenInput = ""
+    @State private var isTestingWebDAV = false
+    @State private var webdavTestStatus: String? = nil
+    @State private var webdavTestSuccess = false
 
     public init() {}
+
+    private var appVersionLabel: String {
+        let shortVer = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "2.2.0"
+        let buildVer = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "15"
+        return "\(shortVer) (Build \(buildVer))"
+    }
 
     public var body: some View {
         NavigationView {
             Form {
-                // Section 1: Local Wi-Fi Transfer Server
+                // Section 1: Local Wi-Fi Transfer Server (PIN-Protected)
                 Section(header: Text("Local Wi-Fi Browser Transfer")) {
                     Toggle(isOn: Binding(
                         get: { webServer.isRunning },
@@ -28,14 +49,36 @@ public struct SettingsView: View {
                     }
 
                     if webServer.isRunning {
-                        VStack(alignment: .leading, spacing: 6) {
+                        VStack(alignment: .leading, spacing: 8) {
                             Text("Open in any PC or phone browser on this Wi-Fi:")
                                 .font(.caption2)
                                 .foregroundColor(.secondary)
                             Text(webServer.serverURLString)
                                 .font(.system(size: 15, weight: .bold, design: .monospaced))
                                 .foregroundColor(.blue)
-                            Text("Download and upload backups directly over local network with zero cloud quota.")
+
+                            HStack {
+                                Label("Pairing PIN:", systemImage: "lock.shield.fill")
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                                Text(webServer.accessPIN)
+                                    .font(.system(size: 16, weight: .bold, design: .monospaced))
+                                    .foregroundColor(.green)
+                                Spacer()
+                                Button("New PIN") {
+                                    webServer.regeneratePIN()
+                                }
+                                .buttonStyle(BorderlessButtonStyle())
+                                .font(.caption)
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 4)
+                                .background(Color.blue.opacity(0.12))
+                                .foregroundColor(.blue)
+                                .cornerRadius(6)
+                            }
+                            .padding(.top, 2)
+
+                            Text("Protected with a 4-digit session PIN. Supports streaming large uploads and remote backup management.")
                                 .font(.caption2)
                                 .foregroundColor(.secondary)
                         }
@@ -43,7 +86,7 @@ public struct SettingsView: View {
                     }
                 }
 
-                // Section 2: Google Drive Cloud Integration
+                // Section 2: Google Drive Cloud Storage (1-Tap Sign In with Google)
                 Section(header: Text("Google Drive Cloud Storage")) {
                     if googleDrive.isAuthenticated {
                         HStack(spacing: 12) {
@@ -76,7 +119,7 @@ public struct SettingsView: View {
                                 .background(Color(UIColor.secondarySystemBackground))
                                 .cornerRadius(6)
 
-                            Text("Any folder name or nested path. Folders will be created automatically in your Google Drive if they don't exist.")
+                            Text("Any folder name or nested path. Folders are created automatically in your Google Drive if they don't exist.")
                                 .font(.caption2)
                                 .foregroundColor(.secondary)
                         }
@@ -88,7 +131,7 @@ public struct SettingsView: View {
                         }
                     } else {
                         VStack(alignment: .leading, spacing: 10) {
-                            Text("Stream backups directly into your personal Google Drive with 0 MB device storage used.")
+                            Text("Sign in with your Google email, password, and 2FA in Apple's secure Safari sheet to stream backups directly to Google Drive.")
                                 .font(.caption)
                                 .foregroundColor(.secondary)
 
@@ -105,36 +148,15 @@ public struct SettingsView: View {
                                             .font(.caption)
                                             .foregroundColor(.secondary)
                                     }
+                                    .buttonStyle(BorderlessButtonStyle())
                                 }
                                 .padding(8)
                                 .background(Color.red.opacity(0.1))
                                 .cornerRadius(8)
                             }
 
-                            VStack(alignment: .leading, spacing: 6) {
-                                HStack {
-                                    Text("OAuth 2.0 Client ID")
-                                        .font(.caption)
-                                        .foregroundColor(.secondary)
-                                    Spacer()
-                                    Button(action: { showGoogleGuide = true }) {
-                                        Label("Setup Guide", systemImage: "questionmark.circle")
-                                            .font(.caption)
-                                            .foregroundColor(.blue)
-                                    }
-                                }
-
-                                TextField("xxxxxx.apps.googleusercontent.com", text: $googleDrive.customClientId)
-                                    .font(.system(size: 13, design: .monospaced))
-                                    .autocapitalization(.none)
-                                    .disableAutocorrection(true)
-                                    .padding(8)
-                                    .background(Color(UIColor.secondarySystemBackground))
-                                    .cornerRadius(6)
-                            }
-
                             VStack(alignment: .leading, spacing: 4) {
-                                Text("Target Cloud Folder / Path (Optional)")
+                                Text("Target Cloud Folder / Path")
                                     .font(.caption)
                                     .foregroundColor(.secondary)
 
@@ -148,10 +170,10 @@ public struct SettingsView: View {
                             }
 
                             Button(action: {
-                                if googleDrive.customClientId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                                    showGoogleGuide = true
-                                } else {
+                                if googleDrive.canStartOneTapSignIn {
                                     googleDrive.signIn()
+                                } else {
+                                    activeSheet = .googleGuide
                                 }
                             }) {
                                 HStack {
@@ -159,9 +181,9 @@ public struct SettingsView: View {
                                         ProgressView()
                                             .progressViewStyle(CircularProgressViewStyle(tint: .white))
                                     } else {
-                                        Image(systemName: "link.badge.plus")
+                                        Image(systemName: "person.badge.key.fill")
                                     }
-                                    Text(googleDrive.customClientId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "Setup Google Client ID (2 min)" : "Sign In with Google")
+                                    Text(googleDrive.canStartOneTapSignIn ? "Sign In with Google" : "Configure Google Sign-In (2 min)")
                                 }
                                 .font(.headline)
                                 .foregroundColor(.white)
@@ -170,13 +192,46 @@ public struct SettingsView: View {
                                 .background(Color.blue)
                                 .cornerRadius(8)
                             }
+                            .buttonStyle(BorderlessButtonStyle())
                             .padding(.vertical, 2)
+
+                            if googleDrive.hasBundledDefaultClientId && googleDrive.customClientId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                                HStack(spacing: 6) {
+                                    Image(systemName: "checkmark.seal.fill")
+                                        .foregroundColor(.green)
+                                        .font(.caption)
+                                    Text("1-tap Sign in with Google is pre-configured — no Client ID or token pasting required.")
+                                        .font(.caption2)
+                                        .foregroundColor(.secondary)
+                                }
+                            }
                         }
                     }
 
                     DisclosureGroup("Advanced OAuth Settings (Optional)", isExpanded: $showAdvancedOAuth) {
                         VStack(alignment: .leading, spacing: 10) {
-                            Text("Client Secret (Optional for iOS PKCE):")
+                            HStack {
+                                Text("Custom OAuth 2.0 Client ID Override:")
+                                    .font(.caption2)
+                                    .foregroundColor(.secondary)
+                                Spacer()
+                                Button(action: { activeSheet = .googleGuide }) {
+                                    Label("Setup Guide", systemImage: "questionmark.circle")
+                                        .font(.caption2)
+                                        .foregroundColor(.blue)
+                                }
+                                .buttonStyle(BorderlessButtonStyle())
+                            }
+
+                            TextField("xxxxxx.apps.googleusercontent.com", text: $googleDrive.customClientId)
+                                .font(.system(size: 12, design: .monospaced))
+                                .autocapitalization(.none)
+                                .disableAutocorrection(true)
+                                .padding(6)
+                                .background(Color(UIColor.secondarySystemBackground))
+                                .cornerRadius(6)
+
+                            Text("Client Secret (Stored in Keychain — Optional for iOS PKCE):")
                                 .font(.caption2)
                                 .foregroundColor(.secondary)
 
@@ -210,6 +265,7 @@ public struct SettingsView: View {
                                         directTokenInput = ""
                                     }
                                 }
+                                .buttonStyle(BorderlessButtonStyle())
                                 .font(.caption)
                                 .disabled(directTokenInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                             }
@@ -245,15 +301,17 @@ public struct SettingsView: View {
                                 }) {
                                     Label("Re-scan Device", systemImage: "arrow.clockwise")
                                 }
+                                .buttonStyle(BorderlessButtonStyle())
                                 .font(.caption)
 
                                 Spacer()
 
                                 Button(action: {
-                                    showRcloneConfSheet = true
+                                    activeSheet = .rcloneConf
                                 }) {
                                     Label("Paste / Import rclone.conf", systemImage: "doc.badge.plus")
                                 }
+                                .buttonStyle(BorderlessButtonStyle())
                                 .font(.caption)
                             }
                         }
@@ -289,6 +347,7 @@ public struct SettingsView: View {
                                                 .background(Color.green)
                                                 .cornerRadius(6)
                                         }
+                                        .buttonStyle(BorderlessButtonStyle())
                                     }
 
                                     if rclone.isRcloneBinaryPresent {
@@ -304,11 +363,12 @@ public struct SettingsView: View {
                                                     .background(Color.red.opacity(0.1))
                                                     .cornerRadius(6)
                                             }
+                                            .buttonStyle(BorderlessButtonStyle())
                                         } else {
                                             Button(action: {
                                                 _ = rclone.startWebDAVBridge(remoteName: remote.name)
                                             }) {
-                                                Text("Serve WebDAV (127.0.0.1:8085)")
+                                                Text("Serve WebDAV (127.0.0.1:\(rclone.activeBridgePort))")
                                                     .font(.caption)
                                                     .foregroundColor(.blue)
                                                     .padding(.horizontal, 8)
@@ -316,6 +376,7 @@ public struct SettingsView: View {
                                                     .background(Color.blue.opacity(0.1))
                                                     .cornerRadius(6)
                                             }
+                                            .buttonStyle(BorderlessButtonStyle())
                                         }
                                     }
                                 }
@@ -345,15 +406,17 @@ public struct SettingsView: View {
                             }) {
                                 Label("Re-scan", systemImage: "arrow.clockwise")
                             }
+                            .buttonStyle(BorderlessButtonStyle())
                             .font(.caption)
 
                             Spacer()
 
                             Button(action: {
-                                showRcloneConfSheet = true
+                                activeSheet = .rcloneConf
                             }) {
                                 Label("Edit / Import Config", systemImage: "doc.badge.plus")
                             }
+                            .buttonStyle(BorderlessButtonStyle())
                             .font(.caption)
                         }
                     }
@@ -378,11 +441,12 @@ public struct SettingsView: View {
                             .font(.system(size: 12, design: .monospaced))
 
                         Button("Local Rclone") {
-                            webdav.serverURL = "http://127.0.0.1:8085/"
+                            webdav.serverURL = "http://127.0.0.1:\(rclone.activeBridgePort)/"
                             webdav.username = ""
                             webdav.password = ""
                             webdav.updateConfiguredState()
                         }
+                        .buttonStyle(BorderlessButtonStyle())
                         .font(.caption2)
                         .padding(.horizontal, 6)
                         .padding(.vertical, 4)
@@ -396,14 +460,69 @@ public struct SettingsView: View {
 
                     SecureField("Password (Optional for local bridge)", text: $webdav.password)
 
-                    Button("Test & Save Connection") {
+                    Button(action: {
+                        isTestingWebDAV = true
+                        webdavTestStatus = nil
                         Task {
-                            _ = try? await webdav.testConnection()
+                            do {
+                                let ok = try await webdav.testConnection()
+                                await MainActor.run {
+                                    isTestingWebDAV = false
+                                    webdavTestSuccess = ok
+                                    webdavTestStatus = ok ? "Connected and saved!" : "Server rejected PROPFIND credentials or path."
+                                }
+                            } catch {
+                                await MainActor.run {
+                                    isTestingWebDAV = false
+                                    webdavTestSuccess = false
+                                    webdavTestStatus = "Connection failed: \(error.localizedDescription)"
+                                }
+                            }
+                        }
+                    }) {
+                        HStack {
+                            if isTestingWebDAV {
+                                ProgressView()
+                                    .scaleEffect(0.8)
+                                Text("Testing Connection...")
+                            } else {
+                                Text("Test & Save Connection")
+                            }
+                        }
+                    }
+                    .disabled(isTestingWebDAV || webdav.serverURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+
+                    if let status = webdavTestStatus {
+                        HStack(spacing: 6) {
+                            Image(systemName: webdavTestSuccess ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
+                                .foregroundColor(webdavTestSuccess ? .green : .red)
+                            Text(status)
+                                .font(.caption)
+                                .foregroundColor(webdavTestSuccess ? .green : .red)
                         }
                     }
                 }
 
-                // Section 2: System Environment
+                // Section 5: Backup Defaults & Retention
+                Section(header: Text("Backup Defaults & Retention")) {
+                    Picker("Default Backup Mode", selection: $settingsVM.defaultBackupMode) {
+                        ForEach(BackupMode.allCases) { mode in
+                            Text(mode.title).tag(mode)
+                        }
+                    }
+
+                    Toggle("Include Caches by Default", isOn: $settingsVM.defaultIncludeCaches)
+
+                    Picker("Local Retention per App", selection: $settingsVM.maxBackupsPerApp) {
+                        Text("Unlimited").tag(0)
+                        Text("Keep Newest 1").tag(1)
+                        Text("Keep Newest 3").tag(3)
+                        Text("Keep Newest 5").tag(5)
+                        Text("Keep Newest 10").tag(10)
+                    }
+                }
+
+                // Section 6: System Environment
                 Section(header: Text("Environment Diagnostics")) {
                     HStack {
                         Label("Filesystem Privileges", systemImage: "shield.checkerboard")
@@ -423,12 +542,12 @@ public struct SettingsView: View {
                     HStack {
                         Label("Device & OS", systemImage: "iphone")
                         Spacer()
-                        Text("\(UIDevice.current.model) • iOS \(UIDevice.current.systemVersion)")
+                        Text("\(UIDevice.current.model) \u{2022} iOS \(UIDevice.current.systemVersion)")
                             .foregroundColor(.secondary)
                     }
                 }
 
-                // Section 3: Storage Statistics
+                // Section 7: Storage Statistics
                 Section(header: Text("Storage Management")) {
                     HStack {
                         Label("Free Device Storage", systemImage: "internaldrive")
@@ -460,7 +579,7 @@ public struct SettingsView: View {
                     }
                 }
 
-                // Section 4: Storage Locations
+                // Section 8: Storage Locations
                 Section(header: Text("Storage Destination")) {
                     VStack(alignment: .leading, spacing: 4) {
                         Text("Active Backups Directory:")
@@ -473,12 +592,12 @@ public struct SettingsView: View {
                     .padding(.vertical, 4)
                 }
 
-                // Section 5: About
+                // Section 9: About
                 Section(header: Text("About AppVault")) {
                     HStack {
                         Text("App Version")
                         Spacer()
-                        Text("2.1.8 (Rclone & Custom Cloud Folder)")
+                        Text(appVersionLabel)
                             .foregroundColor(.secondary)
                     }
 
@@ -508,11 +627,13 @@ public struct SettingsView: View {
             }
         }
         .navigationViewStyle(StackNavigationViewStyle())
-        .sheet(isPresented: $showGoogleGuide) {
-            GoogleSetupGuideSheet()
-        }
-        .sheet(isPresented: $showRcloneConfSheet) {
-            RcloneConfSheet()
+        .sheet(item: $activeSheet) { sheet in
+            switch sheet {
+            case .googleGuide:
+                GoogleSetupGuideSheet()
+            case .rcloneConf:
+                RcloneConfSheet()
+            }
         }
     }
 }

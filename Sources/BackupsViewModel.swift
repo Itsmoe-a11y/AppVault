@@ -2,44 +2,15 @@ import Foundation
 import SwiftUI
 import Combine
 
-public enum BackupDestination: String, CaseIterable, Identifiable {
-    case local = "local"
-    case googleDrive = "google_drive"
-    case webdav = "webdav"
-
-    public var id: String { rawValue }
-
-    public var title: String {
-        switch self {
-        case .local: return "Device Storage"
-        case .googleDrive: return "Google Drive (Zero Local Space)"
-        case .webdav: return "WebDAV / Nextcloud / NAS"
-        }
-    }
-
-    public var iconName: String {
-        switch self {
-        case .local: return "iphone"
-        case .googleDrive: return "icloud.and.arrow.up.fill"
-        case .webdav: return "server.rack"
-        }
-    }
-}
-
-public enum BackupScope: String, CaseIterable, Identifiable {
-    case onDevice = "On Device"
-    case googleDrive = "Google Drive"
-
-    public var id: String { rawValue }
-}
-
 @MainActor
 public final class BackupsViewModel: ObservableObject {
     @Published public var backups: [BackupRecord] = []
     @Published public var cloudBackups: [GoogleDriveFile] = []
+    @Published public var webdavBackups: [WebDAVFile] = []
     @Published public var selectedScope: BackupScope = .onDevice
     @Published public var isLoading: Bool = false
     @Published public var isCloudLoading: Bool = false
+    @Published public var isWebDAVLoading: Bool = false
     @Published public var activeProgress: OperationProgress? = nil
     @Published public var isPerformingOperation: Bool = false
     @Published public var exportURL: URL? = nil
@@ -48,6 +19,7 @@ public final class BackupsViewModel: ObservableObject {
     @Published public var showAlert: Bool = false
     @Published public var restoreConfirmationRecord: BackupRecord? = nil
     @Published public var restoreConfirmationCloudFile: GoogleDriveFile? = nil
+    @Published public var restoreConfirmationWebDAVFile: WebDAVFile? = nil
     @Published public var renameTargetRecord: BackupRecord? = nil
 
     private let fileManager = FileManager.default
@@ -61,6 +33,9 @@ public final class BackupsViewModel: ObservableObject {
         if GoogleDriveService.shared.isAuthenticated {
             refreshCloudBackups()
         }
+        if WebDAVService.shared.isConfigured {
+            refreshWebDAVBackups()
+        }
     }
 
     // MARK: - 1. Local Backups
@@ -70,12 +45,15 @@ public final class BackupsViewModel: ObservableObject {
             let backupDir = BackupEngine.shared.backupsDirectory
             let fm = FileManager.default
 
-            // Ensure backup directory exists
             if !fm.fileExists(atPath: backupDir.path) {
                 try? fm.createDirectory(at: backupDir, withIntermediateDirectories: true)
             }
 
-            guard let files = try? fm.contentsOfDirectory(at: backupDir, includingPropertiesForKeys: [.contentModificationDateKey, .fileSizeKey], options: [.skipsHiddenFiles]) else {
+            guard let files = try? fm.contentsOfDirectory(
+                at: backupDir,
+                includingPropertiesForKeys: [.contentModificationDateKey, .fileSizeKey],
+                options: [.skipsHiddenFiles]
+            ) else {
                 await MainActor.run {
                     self.backups = []
                     self.isLoading = false
@@ -84,7 +62,10 @@ public final class BackupsViewModel: ObservableObject {
             }
 
             var loaded: [BackupRecord] = []
-            let archives = files.filter { $0.pathExtension.lowercased() == "adbk" || $0.pathExtension.lowercased() == "zip" }
+            let archives = files.filter {
+                let ext = $0.pathExtension.lowercased()
+                return ext == "adbk" || ext == "zip"
+            }
 
             for archive in archives {
                 if let record = self.readMetadata(from: archive) {
@@ -119,73 +100,124 @@ public final class BackupsViewModel: ObservableObject {
         }
     }
 
+    // MARK: - 3. WebDAV / NAS Backups
+    public func refreshWebDAVBackups() {
+        guard WebDAVService.shared.isConfigured else { return }
+        isWebDAVLoading = true
+        Task {
+            do {
+                let files = try await WebDAVService.shared.fetchRemoteFiles()
+                self.webdavBackups = files.filter {
+                    let lower = $0.name.lowercased()
+                    return lower.hasSuffix(".adbk") || lower.hasSuffix(".zip")
+                }
+                self.isWebDAVLoading = false
+            } catch {
+                self.isWebDAVLoading = false
+                self.alertTitle = "WebDAV / NAS"
+                self.alertMessage = error.localizedDescription
+                self.showAlert = true
+            }
+        }
+    }
+
     // MARK: - Read Metadata from Local Archive
     nonisolated private func readMetadata(from archiveURL: URL) -> BackupRecord? {
-        // 1. Fast extraction from tar.gz / PKZip via RestoreEngine
-        if var record = RestoreEngine.shared.extractMetadata(from: archiveURL) {
-            if let attrs = try? FileManager.default.attributesOfItem(atPath: archiveURL.path),
-               let size = attrs[.size] as? Int64 {
-                record.fileSizeBytes = size
-            }
-            return record
-        }
+        let filename = archiveURL.lastPathComponent
+        let attrs = try? FileManager.default.attributesOfItem(atPath: archiveURL.path)
+        let fileSize = (attrs?[.size] as? Int64) ?? 0
+        let modDate = (attrs?[.modificationDate] as? Date) ?? Date()
 
-        let tempMetaDir = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("Meta_\(UUID().uuidString)")
-        defer { try? FileManager.default.removeItem(at: tempMetaDir) }
-
-        try? FileManager.default.createDirectory(at: tempMetaDir, withIntermediateDirectories: true)
-
-        _ = PosixHelper.shared.execute("/usr/bin/ditto", arguments: ["-x", "-k", archiveURL.path, tempMetaDir.path])
-        _ = PosixHelper.shared.execute("/bin/ditto", arguments: ["-x", "-k", archiveURL.path, tempMetaDir.path])
-
-        var metaPath = tempMetaDir.appendingPathComponent("BackupMetadata.plist")
-        if !FileManager.default.fileExists(atPath: metaPath.path) {
-            if let contents = try? FileManager.default.contentsOfDirectory(at: tempMetaDir, includingPropertiesForKeys: nil),
-               let firstSub = contents.first {
-                let subMeta = firstSub.appendingPathComponent("BackupMetadata.plist")
-                if FileManager.default.fileExists(atPath: subMeta.path) {
-                    metaPath = subMeta
-                }
-            }
-        }
-
-        guard let data = try? Data(contentsOf: metaPath),
-              var record = try? PropertyListDecoder().decode(BackupRecord.self, from: data) else {
-            let filename = archiveURL.lastPathComponent
-            let size = (try? FileManager.default.attributesOfItem(atPath: archiveURL.path)[.size] as? Int64) ?? 0
+        // 0. Encrypted AES-256-GCM archives cannot have BackupMetadata.plist read without password
+        if CryptoService.shared.isEncryptedFile(at: archiveURL) {
+            let base = filename
+                .replacingOccurrences(of: ".enc.adbk", with: "", options: .caseInsensitive)
+                .replacingOccurrences(of: ".adbk", with: "", options: .caseInsensitive)
+            let parts = base.split(separator: "_").map(String.init)
+            let guessedName = parts.first ?? base
+            let guessedBundle = parts.count >= 2 ? parts[1] : "encrypted.archive"
             return BackupRecord(
-                bundleIdentifier: "unknown.archive",
-                appName: filename.replacingOccurrences(of: ".\(archiveURL.pathExtension)", with: ""),
-                appVersion: "1.0",
-                appBuild: "1",
-                createdAt: (try? FileManager.default.attributesOfItem(atPath: archiveURL.path)[.modificationDate] as? Date) ?? Date(),
+                bundleIdentifier: guessedBundle,
+                appName: guessedName,
+                appVersion: "Encrypted",
+                appBuild: "-",
+                createdAt: modDate,
                 mode: .dataOnly,
                 includesCaches: false,
+                note: "AES-256-GCM Encrypted Backup",
                 archiveFileName: filename,
-                fileSizeBytes: size,
+                fileSizeBytes: fileSize,
                 hasAppBundle: false,
-                hasDataContainer: true
+                hasDataContainer: true,
+                isEncrypted: true
             )
         }
 
-        if let attrs = try? FileManager.default.attributesOfItem(atPath: archiveURL.path),
-           let size = attrs[.size] as? Int64 {
-            record.fileSizeBytes = size
+        // 1. Fast extraction from tar.gz via RestoreEngine
+        if var record = RestoreEngine.shared.extractMetadata(from: archiveURL) {
+            record.archiveFileName = filename
+            if fileSize > 0 { record.fileSizeBytes = fileSize }
+            return record
         }
 
-        return record
+        // 2. Legacy PKZip fallback (run only one available ditto binary)
+        let dittoPath = FileManager.default.fileExists(atPath: "/usr/bin/ditto") ? "/usr/bin/ditto" : "/bin/ditto"
+        if FileManager.default.fileExists(atPath: dittoPath) {
+            let tempMetaDir = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("Meta_\(UUID().uuidString)")
+            defer { try? FileManager.default.removeItem(at: tempMetaDir) }
+            try? FileManager.default.createDirectory(at: tempMetaDir, withIntermediateDirectories: true)
+
+            _ = PosixHelper.shared.execute(dittoPath, arguments: ["-x", "-k", archiveURL.path, tempMetaDir.path])
+
+            var metaPath = tempMetaDir.appendingPathComponent("BackupMetadata.plist")
+            if !FileManager.default.fileExists(atPath: metaPath.path) {
+                if let contents = try? FileManager.default.contentsOfDirectory(at: tempMetaDir, includingPropertiesForKeys: nil),
+                   let firstSub = contents.first {
+                    let subMeta = firstSub.appendingPathComponent("BackupMetadata.plist")
+                    if FileManager.default.fileExists(atPath: subMeta.path) {
+                        metaPath = subMeta
+                    }
+                }
+            }
+
+            if let data = try? Data(contentsOf: metaPath),
+               var record = try? PropertyListDecoder().decode(BackupRecord.self, from: data) {
+                record.archiveFileName = filename
+                if fileSize > 0 { record.fileSizeBytes = fileSize }
+                return record
+            }
+        }
+
+        return BackupRecord(
+            bundleIdentifier: "unknown.archive",
+            appName: filename.replacingOccurrences(of: ".\(archiveURL.pathExtension)", with: ""),
+            appVersion: "1.0",
+            appBuild: "1",
+            createdAt: modDate,
+            mode: .dataOnly,
+            includesCaches: false,
+            archiveFileName: filename,
+            fileSizeBytes: fileSize,
+            hasAppBundle: false,
+            hasDataContainer: true
+        )
     }
 
     // MARK: - Execute Streaming Backup (Local, Google Drive, or WebDAV)
     public func startBackup(
         for app: InstalledApp,
         mode: BackupMode,
-        includeCaches: Bool,
         destination: BackupDestination,
+        includeCaches: Bool,
+        includeKeychain: Bool = true,
+        includeAppGroups: Bool = true,
+        encryptionPassword: String? = nil,
         note: String
     ) {
         isPerformingOperation = true
-        activeProgress = OperationProgress(stage: "Initializing", fractionCompleted: 0.0, statusDetail: "Starting zero-staging stream...")
+        activeProgress = OperationProgress(stage: "Initializing", fractionCompleted: 0.0, statusDetail: "Preparing streaming backup...")
+
+        let retentionLimit = SettingsViewModel.savedMaxBackupsPerApp
 
         Task.detached(priority: .userInitiated) {
             do {
@@ -194,6 +226,9 @@ public final class BackupsViewModel: ObservableObject {
                         for: app,
                         mode: mode,
                         includeCaches: includeCaches,
+                        includeKeychain: includeKeychain,
+                        includeAppGroups: includeAppGroups,
+                        encryptionPassword: encryptionPassword,
                         note: note
                     ) { progress in
                         Task { @MainActor in
@@ -205,45 +240,18 @@ public final class BackupsViewModel: ObservableObject {
                         self.isPerformingOperation = false
                         self.activeProgress = nil
                         self.refreshCloudBackups()
-                        self.alertTitle = "Cloud Backup Finished"
-                        self.alertMessage = "Successfully backed up \(newRecord.appName) directly to Google Drive without consuming local device storage!"
+                        self.alertTitle = "Cloud Backup Complete"
+                        self.alertMessage = "Successfully streamed \(newRecord.appName) (\(newRecord.formattedSize)) directly to Google Drive!"
                         self.showAlert = true
                     }
                 } else if destination == .webdav {
-                    let safeName = app.name.components(separatedBy: CharacterSet.alphanumerics.inverted).joined()
-                    let timestamp = Int(Date().timeIntervalSince1970)
-                    let archiveName = "\(safeName)_\(app.bundleIdentifier)_\(timestamp).adbk"
-
-                    var uploadData = Data()
-                    let newRecord = try await StreamingArchiveEngine.shared.streamBackup(
+                    let newRecord = try await BackupEngine.shared.createWebDAVStreamingBackup(
                         for: app,
                         mode: mode,
                         includeCaches: includeCaches,
-                        note: note,
-                        onProgress: { p in
-                            Task { @MainActor in
-                                self.activeProgress = p
-                            }
-                        },
-                        onCompressedChunk: { chunk in
-                            uploadData.append(chunk)
-                        }
-                    )
-
-                    try await WebDAVService.shared.upload(data: uploadData, remoteFileName: archiveName)
-
-                    await MainActor.run {
-                        self.isPerformingOperation = false
-                        self.activeProgress = nil
-                        self.alertTitle = "WebDAV Upload Complete"
-                        self.alertMessage = "Successfully streamed \(newRecord.appName) to your WebDAV server!"
-                        self.showAlert = true
-                    }
-                } else {
-                    let newRecord = try await BackupEngine.shared.createStreamingBackup(
-                        for: app,
-                        mode: mode,
-                        includeCaches: includeCaches,
+                        includeKeychain: includeKeychain,
+                        includeAppGroups: includeAppGroups,
+                        encryptionPassword: encryptionPassword,
                         note: note
                     ) { progress in
                         Task { @MainActor in
@@ -252,9 +260,40 @@ public final class BackupsViewModel: ObservableObject {
                     }
 
                     await MainActor.run {
-                        self.backups.insert(newRecord, at: 0)
                         self.isPerformingOperation = false
                         self.activeProgress = nil
+                        self.refreshWebDAVBackups()
+                        self.alertTitle = "WebDAV Upload Complete"
+                        self.alertMessage = "Successfully uploaded \(newRecord.appName) (\(newRecord.formattedSize)) to your WebDAV server!"
+                        self.showAlert = true
+                    }
+                } else {
+                    let newRecord = try await BackupEngine.shared.createStreamingBackup(
+                        for: app,
+                        mode: mode,
+                        includeCaches: includeCaches,
+                        includeKeychain: includeKeychain,
+                        includeAppGroups: includeAppGroups,
+                        encryptionPassword: encryptionPassword,
+                        note: note
+                    ) { progress in
+                        Task { @MainActor in
+                            self.activeProgress = progress
+                        }
+                    }
+
+                    if retentionLimit > 0 {
+                        BackupEngine.shared.pruneOldBackups(for: app.bundleIdentifier, keepNewest: retentionLimit)
+                    }
+
+                    await MainActor.run {
+                        self.isPerformingOperation = false
+                        self.activeProgress = nil
+                        if retentionLimit > 0 {
+                            self.refreshLocalBackups()
+                        } else {
+                            self.backups.insert(newRecord, at: 0)
+                        }
                     }
                 }
             } catch {
@@ -269,8 +308,30 @@ public final class BackupsViewModel: ObservableObject {
         }
     }
 
+    // MARK: - Verify Local Archive Integrity (SHA-256 + Metadata)
+    public func verifyBackup(_ record: BackupRecord) {
+        let archiveURL = fileURL(for: record)
+        isPerformingOperation = true
+        activeProgress = OperationProgress(stage: "Verifying Archive", fractionCompleted: 0.35, statusDetail: "Computing SHA-256 checksum for \(record.archiveFileName)...")
+
+        Task.detached(priority: .userInitiated) {
+            let result = BackupEngine.shared.verifyArchive(at: archiveURL)
+            await MainActor.run {
+                self.isPerformingOperation = false
+                self.activeProgress = nil
+                self.alertTitle = result.isValid ? "Archive Verified" : "Integrity Check Failed"
+                self.alertMessage = result.detail
+                self.showAlert = true
+            }
+        }
+    }
+
     // MARK: - Restore from Local Backup
-    public func startRestore(record: BackupRecord, options: SelectiveRestoreOptions = SelectiveRestoreOptions()) {
+    public func startRestore(
+        record: BackupRecord,
+        options: SelectiveRestoreOptions = SelectiveRestoreOptions(),
+        password: String? = nil
+    ) {
         isPerformingOperation = true
         activeProgress = OperationProgress(stage: "Initializing", fractionCompleted: 0.0, statusDetail: "Preparing restoration...")
 
@@ -278,7 +339,7 @@ public final class BackupsViewModel: ObservableObject {
 
         Task.detached(priority: .userInitiated) {
             do {
-                _ = try await RestoreEngine.shared.restore(from: archiveURL, options: options) { progress in
+                _ = try await RestoreEngine.shared.restore(from: archiveURL, options: options, password: password) { progress in
                     Task { @MainActor in
                         self.activeProgress = progress
                     }
@@ -287,6 +348,7 @@ public final class BackupsViewModel: ObservableObject {
                 await MainActor.run {
                     self.isPerformingOperation = false
                     self.activeProgress = nil
+                    self.refreshLocalBackups()
                     self.alertTitle = "Restore Complete"
                     self.alertMessage = "Successfully restored \(record.appName) data! You may now open the app."
                     self.showAlert = true
@@ -304,13 +366,18 @@ public final class BackupsViewModel: ObservableObject {
     }
 
     // MARK: - Restore Direct from Google Drive
-    public func startCloudRestore(file: GoogleDriveFile, options: SelectiveRestoreOptions = SelectiveRestoreOptions()) {
+    public func startCloudRestore(
+        file: GoogleDriveFile,
+        options: SelectiveRestoreOptions = SelectiveRestoreOptions(),
+        password: String? = nil
+    ) {
         isPerformingOperation = true
         activeProgress = OperationProgress(stage: "Downloading", fractionCompleted: 0.1, statusDetail: "Downloading \(file.name) from Google Drive...")
 
         let tempArchive = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("CloudRestore_\(UUID().uuidString)_\(file.name)")
 
         Task.detached(priority: .userInitiated) {
+            defer { try? FileManager.default.removeItem(at: tempArchive) }
             do {
                 try await GoogleDriveService.shared.downloadFile(file: file, destinationURL: tempArchive) { pct in
                     Task { @MainActor in
@@ -322,7 +389,7 @@ public final class BackupsViewModel: ObservableObject {
                     }
                 }
 
-                _ = try await RestoreEngine.shared.restore(from: tempArchive, options: options) { progress in
+                _ = try await RestoreEngine.shared.restore(from: tempArchive, options: options, password: password) { progress in
                     Task { @MainActor in
                         var scaled = progress
                         scaled.fractionCompleted = 0.5 + progress.fractionCompleted * 0.5
@@ -330,21 +397,67 @@ public final class BackupsViewModel: ObservableObject {
                     }
                 }
 
-                try? FileManager.default.removeItem(at: tempArchive)
-
                 await MainActor.run {
                     self.isPerformingOperation = false
                     self.activeProgress = nil
+                    self.refreshLocalBackups()
                     self.alertTitle = "Cloud Restore Complete"
                     self.alertMessage = "Successfully restored app from Google Drive backup!"
                     self.showAlert = true
                 }
             } catch {
-                try? FileManager.default.removeItem(at: tempArchive)
                 await MainActor.run {
                     self.isPerformingOperation = false
                     self.activeProgress = nil
                     self.alertTitle = "Cloud Restore Failed"
+                    self.alertMessage = error.localizedDescription
+                    self.showAlert = true
+                }
+            }
+        }
+    }
+
+    // MARK: - Restore Direct from WebDAV / NAS
+    public func startWebDAVRestore(
+        file: WebDAVFile,
+        options: SelectiveRestoreOptions = SelectiveRestoreOptions(),
+        password: String? = nil
+    ) {
+        isPerformingOperation = true
+        activeProgress = OperationProgress(stage: "Downloading", fractionCompleted: 0.1, statusDetail: "Downloading \(file.name) from WebDAV...")
+
+        let tempArchive = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("WebDAVRestore_\(UUID().uuidString)_\(file.name)")
+
+        Task.detached(priority: .userInitiated) {
+            defer { try? FileManager.default.removeItem(at: tempArchive) }
+            do {
+                try await WebDAVService.shared.download(remoteFileName: file.name, destinationURL: tempArchive)
+
+                await MainActor.run {
+                    self.activeProgress = OperationProgress(stage: "Restoring", fractionCompleted: 0.5, statusDetail: "Downloaded \(file.name). Restoring container...")
+                }
+
+                _ = try await RestoreEngine.shared.restore(from: tempArchive, options: options, password: password) { progress in
+                    Task { @MainActor in
+                        var scaled = progress
+                        scaled.fractionCompleted = 0.5 + progress.fractionCompleted * 0.5
+                        self.activeProgress = scaled
+                    }
+                }
+
+                await MainActor.run {
+                    self.isPerformingOperation = false
+                    self.activeProgress = nil
+                    self.refreshLocalBackups()
+                    self.alertTitle = "WebDAV Restore Complete"
+                    self.alertMessage = "Successfully restored app from \(file.name)!"
+                    self.showAlert = true
+                }
+            } catch {
+                await MainActor.run {
+                    self.isPerformingOperation = false
+                    self.activeProgress = nil
+                    self.alertTitle = "WebDAV Restore Failed"
                     self.alertMessage = error.localizedDescription
                     self.showAlert = true
                 }
@@ -390,6 +503,36 @@ public final class BackupsViewModel: ObservableObject {
         }
     }
 
+    // MARK: - Download WebDAV Backup to Local Storage
+    public func downloadWebDAVBackupToLocal(file: WebDAVFile) {
+        let dest = BackupEngine.shared.backupsDirectory.appendingPathComponent(file.name)
+        isPerformingOperation = true
+        activeProgress = OperationProgress(stage: "Downloading WebDAV", fractionCompleted: 0.25, statusDetail: "Downloading \(file.name) from WebDAV...")
+
+        Task.detached(priority: .userInitiated) {
+            do {
+                try await WebDAVService.shared.download(remoteFileName: file.name, destinationURL: dest)
+
+                await MainActor.run {
+                    self.isPerformingOperation = false
+                    self.activeProgress = nil
+                    self.refreshLocalBackups()
+                    self.alertTitle = "Download Finished"
+                    self.alertMessage = "Saved \(file.name) to on-device backups."
+                    self.showAlert = true
+                }
+            } catch {
+                await MainActor.run {
+                    self.isPerformingOperation = false
+                    self.activeProgress = nil
+                    self.alertTitle = "WebDAV Download Error"
+                    self.alertMessage = error.localizedDescription
+                    self.showAlert = true
+                }
+            }
+        }
+    }
+
     // MARK: - Delete Cloud Backup
     public func deleteCloudBackup(file: GoogleDriveFile) {
         Task {
@@ -398,6 +541,20 @@ public final class BackupsViewModel: ObservableObject {
                 self.cloudBackups.removeAll { $0.id == file.id }
             } catch {
                 self.alertTitle = "Delete Error"
+                self.alertMessage = error.localizedDescription
+                self.showAlert = true
+            }
+        }
+    }
+
+    // MARK: - Delete WebDAV Backup
+    public func deleteWebDAVBackup(file: WebDAVFile) {
+        Task {
+            do {
+                try await WebDAVService.shared.deleteFile(remoteFileName: file.name)
+                self.webdavBackups.removeAll { $0.id == file.id }
+            } catch {
+                self.alertTitle = "WebDAV Delete Error"
                 self.alertMessage = error.localizedDescription
                 self.showAlert = true
             }
@@ -418,7 +575,6 @@ public final class BackupsViewModel: ObservableObject {
                 showAlert = true
             }
         } else {
-            // File does not exist on disk, remove stale record
             backups.removeAll { $0.id == record.id }
         }
     }
@@ -433,7 +589,6 @@ public final class BackupsViewModel: ObservableObject {
             return
         }
 
-        // Sanitize characters to comply with POSIX filesystem standards
         let invalidChars = CharacterSet(charactersIn: "/:\\?%*|\"<>")
         let sanitized = trimmed.components(separatedBy: invalidChars).joined(separator: "_")
 
@@ -450,7 +605,7 @@ public final class BackupsViewModel: ObservableObject {
         let targetURL = BackupEngine.shared.backupsDirectory.appendingPathComponent(newFileName)
 
         if currentURL.path == targetURL.path {
-            return // Same file, no action needed
+            return
         }
 
         guard !fileManager.fileExists(atPath: targetURL.path) else {
@@ -464,27 +619,9 @@ public final class BackupsViewModel: ObservableObject {
             try fileManager.moveItem(at: currentURL, to: targetURL)
             PosixHelper.shared.fixPermissions(at: targetURL.path)
 
-            // Update record in published backups array
             if let idx = backups.firstIndex(where: { $0.id == record.id }) {
-                let current = backups[idx]
-                let updated = BackupRecord(
-                    id: current.id,
-                    bundleIdentifier: current.bundleIdentifier,
-                    appName: current.appName,
-                    appVersion: current.appVersion,
-                    appBuild: current.appBuild,
-                    createdAt: current.createdAt,
-                    mode: current.mode,
-                    includesCaches: current.includesCaches,
-                    note: current.note,
-                    archiveFileName: newFileName,
-                    fileSizeBytes: current.fileSizeBytes,
-                    hasAppBundle: current.hasAppBundle,
-                    hasDataContainer: current.hasDataContainer,
-                    appGroupIDs: current.appGroupIDs,
-                    deviceModel: current.deviceModel,
-                    systemVersion: current.systemVersion
-                )
+                var updated = backups[idx]
+                updated.archiveFileName = newFileName
                 backups[idx] = updated
             }
 
