@@ -215,13 +215,26 @@ public struct BackupsListView: View {
                         title: Text("Export \(record.appName) Backup"),
                         message: Text(record.archiveFileName),
                         buttons: [
-                            .default(Text("Save to Files (iCloud / Local)")) {
+                            .default(Text("Share / AirDrop / Save to Files")) {
+                                let url = backupsVM.fileURL(for: record)
+                                presentShareSheet(url: url)
+                            },
+                            .default(Text("Open In... (iOS 16 TrollStore Safe)")) {
+                                let url = backupsVM.fileURL(for: record)
+                                presentOpenInMenu(url: url)
+                            },
+                            .default(Text("Save via Files Picker")) {
                                 let url = backupsVM.fileURL(for: record)
                                 presentExportPicker(url: url)
                             },
-                            .default(Text("Share / AirDrop")) {
+                            .default(Text("Reveal in Filza / Copy Path")) {
                                 let url = backupsVM.fileURL(for: record)
-                                presentShareSheet(url: url)
+                                UIPasteboard.general.string = url.path
+                                if !openInFilza(url: url) {
+                                    backupsVM.alertTitle = "Archive Path Copied"
+                                    backupsVM.alertMessage = "Path copied to clipboard:\n\(url.path)"
+                                    backupsVM.showAlert = true
+                                }
                             },
                             .cancel()
                         ]

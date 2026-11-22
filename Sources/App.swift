@@ -9,6 +9,9 @@ public struct AppVaultApp: App {
     public var body: some Scene {
         WindowGroup {
             MainTabView()
+                .onOpenURL { url in
+                    GoogleDriveService.shared.handleIncomingOAuthURL(url)
+                }
         }
     }
 

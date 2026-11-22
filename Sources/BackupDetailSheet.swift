@@ -22,6 +22,7 @@ public struct BackupDetailSheet: View {
     @State private var currentProgress: OperationProgress? = nil
     @State private var executionError: String? = nil
     @State private var completedRecord: BackupRecord? = nil
+    @State private var activeTask: Task<Void, Never>? = nil
 
     public init(app: InstalledApp) {
         self.app = app
@@ -189,7 +190,7 @@ public struct BackupDetailSheet: View {
                                         .foregroundColor(.secondary)
                                 }
                                 Text(enableEncryption
-                                     ? "Archive will be encrypted with AES-256-GCM before uploading to \(googleDrive.targetFolderName)."
+                                     ? "Archive will be compressed & AES-256-GCM encrypted on-the-fly and streamed directly to \(googleDrive.targetFolderName). Uses 0 MB of local storage."
                                      : "Archive will be compressed on-the-fly and streamed directly to \(googleDrive.targetFolderName). Uses 0 MB of local storage.")
                                     .font(.caption2)
                                     .foregroundColor(.blue)
@@ -311,6 +312,18 @@ public struct BackupDetailSheet: View {
                             } else {
                                 ProgressView("Starting zero-staging stream...")
                             }
+
+                            Button(role: .destructive, action: cancelBackup) {
+                                HStack {
+                                    Spacer()
+                                    Label("Cancel Backup", systemImage: "stop.circle.fill")
+                                        .font(.subheadline)
+                                        .foregroundColor(.red)
+                                    Spacer()
+                                }
+                            }
+                            .buttonStyle(BorderlessButtonStyle())
+                            .padding(.top, 4)
                         }
                         .padding(.vertical, 8)
                     }
@@ -343,7 +356,8 @@ public struct BackupDetailSheet: View {
             }
             .onAppear {
                 if !currentApp.isSized || (currentApp.appSizeBytes == 0 && currentApp.dataSizeBytes == 0) {
-                    Task.detached(priority: .userInitiated) {
+                    activeTask?.cancel()
+        activeTask = Task.detached(priority: .userInitiated) {
                         let sizes = AppDiscoveryService.shared.calculateAppSizes(for: currentApp, forceRefresh: true)
                         await MainActor.run {
                             currentApp.appSizeBytes = sizes.appSize
@@ -358,6 +372,14 @@ public struct BackupDetailSheet: View {
         .navigationViewStyle(StackNavigationViewStyle())
     }
 
+
+    private func cancelBackup() {
+        activeTask?.cancel()
+        activeTask = nil
+        isExecuting = false
+        executionError = "Backup cancelled by user."
+    }
+
     private func startBackup() {
         isExecuting = true
         executionError = nil
@@ -367,7 +389,8 @@ public struct BackupDetailSheet: View {
         let password = enableEncryption ? encryptionPassword : nil
         let retentionLimit = SettingsViewModel.savedMaxBackupsPerApp
 
-        Task.detached(priority: .userInitiated) {
+        activeTask?.cancel()
+        activeTask = Task.detached(priority: .userInitiated) {
             do {
                 if self.selectedDestination == .googleDrive {
                     let record = try await BackupEngine.shared.createGoogleDriveStreamingBackup(

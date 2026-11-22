@@ -29,6 +29,7 @@
 	<key>LSApplicationQueriesSchemes</key>
 	<array>
 		<string>apple-magnifier</string>
+		<string>filza</string>
 	</array>
 	<key>CFBundleURLTypes</key>
 	<array>

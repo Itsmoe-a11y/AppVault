@@ -195,6 +195,25 @@ public struct SettingsView: View {
                             .buttonStyle(BorderlessButtonStyle())
                             .padding(.vertical, 2)
 
+                            if googleDrive.canStartOneTapSignIn {
+                                Button(action: {
+                                    googleDrive.signInWithExternalBrowser()
+                                }) {
+                                    HStack {
+                                        Image(systemName: "safari")
+                                        Text("Sign In via External Browser (iOS 16 Fix)")
+                                    }
+                                    .font(.caption)
+                                    .fontWeight(.semibold)
+                                    .foregroundColor(.blue)
+                                    .frame(maxWidth: .infinity)
+                                    .padding(.vertical, 8)
+                                    .background(Color.blue.opacity(0.1))
+                                    .cornerRadius(8)
+                                }
+                                .buttonStyle(BorderlessButtonStyle())
+                            }
+
                             if googleDrive.hasBundledDefaultClientId && googleDrive.customClientId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                                 HStack(spacing: 6) {
                                     Image(systemName: "checkmark.seal.fill")

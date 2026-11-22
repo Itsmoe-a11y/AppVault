@@ -192,6 +192,30 @@ public final class GoogleDriveService: NSObject, ObservableObject, ASWebAuthenti
 
     private var authSession: ASWebAuthenticationSession?
 
+    // Pending PKCE state for External Browser sign-in fallback (iOS 16.0 WebKit workaround)
+    private var pendingExternalVerifier: String?
+    private var pendingExternalState: String?
+    private var pendingExternalRedirectURI: String?
+    private var pendingExternalClientId: String?
+
+    /// Dedicated API session with strict timeouts so calls never hang silently on "Initializing".
+    private lazy var apiSession: URLSession = {
+        let cfg = URLSessionConfiguration.default
+        cfg.timeoutIntervalForRequest = 30
+        cfg.timeoutIntervalForResource = 90
+        cfg.waitsForConnectivity = false
+        return URLSession(configuration: cfg)
+    }()
+
+    /// Dedicated upload session with generous per-chunk timeouts for 5 MB resumable slices.
+    private lazy var uploadSession: URLSession = {
+        let cfg = URLSessionConfiguration.default
+        cfg.timeoutIntervalForRequest = 60
+        cfg.timeoutIntervalForResource = 600
+        cfg.waitsForConnectivity = false
+        return URLSession(configuration: cfg)
+    }()
+
     private override init() {
         let savedClientId = UserDefaults.standard.string(forKey: "gdrive_client_id") ?? ""
         if savedClientId.contains("h8p0uqqp8j68n2j9c58t4aevl5a5t8j3") {
@@ -337,6 +361,110 @@ public final class GoogleDriveService: NSObject, ObservableObject, ASWebAuthenti
         authSession?.start()
     }
 
+    // MARK: - External Browser OAuth 2.0 PKCE Sign In (iOS 16.0 WebKit Workaround)
+    /// Opens full Safari / default browser outside ASWebAuthenticationSession and completes via AppVaultApp.onOpenURL.
+    public func signInWithExternalBrowser() {
+        guard let built = buildOAuthRequest() else { return }
+        pendingExternalVerifier = built.verifier
+        pendingExternalState = built.state
+        pendingExternalRedirectURI = built.redirectURI
+        pendingExternalClientId = built.clientId
+        isAuthenticating = true
+        errorMessage = nil
+
+        UIApplication.shared.open(built.authURL, options: [:]) { [weak self] success in
+            if !success {
+                Task { @MainActor in
+                    self?.isAuthenticating = false
+                    self?.errorMessage = "Could not open external browser for Google Sign-In."
+                }
+            }
+        }
+    }
+
+    /// Handles the OAuth callback URL returned from External Safari / Chrome into AppVaultApp.onOpenURL.
+    public func handleIncomingOAuthURL(_ url: URL) {
+        guard let queryItems = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems else {
+            return
+        }
+        // Only handle callbacks that look like an OAuth redirect for our pending external session
+        guard let verifier = pendingExternalVerifier,
+              let expectedState = pendingExternalState,
+              let redirectURI = pendingExternalRedirectURI,
+              let clientId = pendingExternalClientId else {
+            return
+        }
+
+        pendingExternalVerifier = nil
+        pendingExternalState = nil
+        pendingExternalRedirectURI = nil
+        pendingExternalClientId = nil
+        isAuthenticating = false
+
+        let returnedState = queryItems.first(where: { $0.name == "state" })?.value
+        guard returnedState == expectedState else {
+            errorMessage = "OAuth state mismatch from external browser. Please try signing in again."
+            return
+        }
+
+        guard let code = queryItems.first(where: { $0.name == "code" })?.value, !code.isEmpty else {
+            let errDesc = queryItems.first(where: { $0.name == "error" })?.value ?? "Missing authorization code"
+            errorMessage = "Google sign-in failed: \(errDesc)"
+            return
+        }
+
+        Task {
+            await self.exchangeCodeForTokens(code: code, verifier: verifier, redirectURI: redirectURI, clientId: clientId)
+        }
+    }
+
+    private func buildOAuthRequest() -> (authURL: URL, verifier: String, state: String, redirectURI: String, clientId: String, callbackScheme: String)? {
+        let clientId = effectiveClientId
+        guard !clientId.isEmpty else {
+            errorMessage = "Google OAuth Client ID is not configured yet. Bake in your iOS Client ID or enter one under Advanced OAuth Settings."
+            return nil
+        }
+
+        let redirectURI: String
+        let callbackScheme: String
+        if clientId.hasSuffix(".apps.googleusercontent.com") {
+            let prefix = clientId.replacingOccurrences(of: ".apps.googleusercontent.com", with: "")
+            callbackScheme = "com.googleusercontent.apps.\(prefix)"
+            redirectURI = "\(callbackScheme):/oauth2redirect"
+        } else {
+            callbackScheme = "dev.moe.appvault"
+            redirectURI = "dev.moe.appvault:/oauth2redirect"
+        }
+
+        let scope = "https://www.googleapis.com/auth/drive.file https://www.googleapis.com/auth/userinfo.email https://www.googleapis.com/auth/userinfo.profile"
+        let expectedState = UUID().uuidString
+
+        guard let verifier = generateCodeVerifier(),
+              let challenge = generateCodeChallenge(from: verifier) else {
+            errorMessage = "Failed to generate PKCE cryptographic material."
+            return nil
+        }
+
+        var components = URLComponents(string: "https://accounts.google.com/o/oauth2/v2/auth")!
+        components.queryItems = [
+            URLQueryItem(name: "client_id", value: clientId),
+            URLQueryItem(name: "redirect_uri", value: redirectURI),
+            URLQueryItem(name: "response_type", value: "code"),
+            URLQueryItem(name: "scope", value: scope),
+            URLQueryItem(name: "code_challenge", value: challenge),
+            URLQueryItem(name: "code_challenge_method", value: "S256"),
+            URLQueryItem(name: "state", value: expectedState),
+            URLQueryItem(name: "access_type", value: "offline"),
+            URLQueryItem(name: "prompt", value: "select_account consent")
+        ]
+
+        guard let authURL = components.url else {
+            errorMessage = "Invalid OAuth URL."
+            return nil
+        }
+        return (authURL, verifier, expectedState, redirectURI, clientId, callbackScheme)
+    }
+
     // MARK: - Exchange Code for Tokens
     private func exchangeCodeForTokens(code: String, verifier: String, redirectURI: String, clientId: String) async {
         guard let tokenURL = URL(string: "https://oauth2.googleapis.com/token") else { return }
@@ -370,7 +498,7 @@ public final class GoogleDriveService: NSObject, ObservableObject, ASWebAuthenti
         request.httpBody = bodyString.data(using: .utf8)
 
         do {
-            let (data, response) = try await URLSession.shared.data(for: request)
+            let (data, response) = try await uploadSession.data(for: request)
             guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
                 let err = String(data: data, encoding: .utf8) ?? "HTTP Error"
                 self.errorMessage = "Token exchange failed: \(err)"
@@ -420,6 +548,9 @@ public final class GoogleDriveService: NSObject, ObservableObject, ASWebAuthenti
         request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
 
         let clientId = effectiveClientId
+        guard !clientId.isEmpty else {
+            throw NSError(domain: "GoogleDrive", code: 401, userInfo: [NSLocalizedDescriptionKey: "Google OAuth Client ID is missing. Configure your Client ID in Settings or re-import from rclone."])
+        }
         var bodyParams = [
             "client_id": clientId,
             "refresh_token": refresh,
@@ -441,7 +572,7 @@ public final class GoogleDriveService: NSObject, ObservableObject, ASWebAuthenti
 
         request.httpBody = bodyString.data(using: .utf8)
 
-        let (data, response) = try await URLSession.shared.data(for: request)
+        let (data, response) = try await uploadSession.data(for: request)
         guard let http = response as? HTTPURLResponse, http.statusCode == 200,
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let newAccess = json["access_token"] as? String else {
@@ -467,7 +598,7 @@ public final class GoogleDriveService: NSObject, ObservableObject, ASWebAuthenti
         var request = URLRequest(url: url)
         request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
 
-        if let (data, _) = try? await URLSession.shared.data(for: request),
+        if let (data, _) = try? await apiSession.data(for: request),
            let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
             self.userEmail = json["email"] as? String ?? ""
             self.userName = json["name"] as? String ?? ""
@@ -544,7 +675,11 @@ public final class GoogleDriveService: NSObject, ObservableObject, ASWebAuthenti
         var listReq = URLRequest(url: listURL)
         listReq.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
 
-        let (data, _) = try await URLSession.shared.data(for: listReq)
+        let (data, listRes) = try await apiSession.data(for: listReq)
+        if let listHttp = listRes as? HTTPURLResponse, !(200...299).contains(listHttp.statusCode) {
+            let errBody = String(data: data, encoding: .utf8) ?? "HTTP \(listHttp.statusCode)"
+            throw NSError(domain: "GoogleDrive", code: listHttp.statusCode, userInfo: [NSLocalizedDescriptionKey: "Google Drive folder lookup failed (HTTP \(listHttp.statusCode)): \(errBody)"])
+        }
         if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
            let files = json["files"] as? [[String: Any]],
            let first = files.first,
@@ -571,7 +706,7 @@ public final class GoogleDriveService: NSObject, ObservableObject, ASWebAuthenti
 
         createReq.httpBody = try JSONSerialization.data(withJSONObject: metadata)
 
-        let (createData, res) = try await URLSession.shared.data(for: createReq)
+        let (createData, res) = try await apiSession.data(for: createReq)
         guard let http = res as? HTTPURLResponse, (http.statusCode == 200 || http.statusCode == 201),
               let createJson = try? JSONSerialization.jsonObject(with: createData) as? [String: Any],
               let newId = createJson["id"] as? String else {
@@ -585,17 +720,23 @@ public final class GoogleDriveService: NSObject, ObservableObject, ASWebAuthenti
     // MARK: - Resumable Upload Session (Initiation)
     public func initiateResumableUpload(
         fileName: String,
-        mimeType: String = "application/x-gzip"
+        mimeType: String = "application/x-gzip",
+        onStatus: ((String) -> Void)? = nil
     ) async throws -> URL {
+        onStatus?("Validating Google Drive access token...")
         let token = try await ensureValidToken()
+
+        onStatus?("Locating Google Drive folder '\(targetFolderName)'...")
         let folderID = try await getOrCreateAppFolder()
 
+        onStatus?("Opening Google Drive resumable upload session...")
         guard let uploadURL = URL(string: "https://www.googleapis.com/upload/drive/v3/files?uploadType=resumable") else {
             throw NSError(domain: "GoogleDrive", code: 400, userInfo: [NSLocalizedDescriptionKey: "Invalid upload URL."])
         }
 
         var request = URLRequest(url: uploadURL)
         request.httpMethod = "POST"
+        request.timeoutInterval = 30
         request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         request.setValue("application/json; charset=UTF-8", forHTTPHeaderField: "Content-Type")
         request.setValue(mimeType, forHTTPHeaderField: "X-Upload-Content-Type")
@@ -606,12 +747,15 @@ public final class GoogleDriveService: NSObject, ObservableObject, ASWebAuthenti
         ]
         request.httpBody = try JSONSerialization.data(withJSONObject: metadata)
 
-        let (_, response) = try await URLSession.shared.data(for: request)
-        guard let http = response as? HTTPURLResponse,
-              http.statusCode == 200,
-              let locationString = http.allHeaderFields["Location"] as? String ?? http.allHeaderFields["location"] as? String,
+        let (data, response) = try await apiSession.data(for: request)
+        guard let http = response as? HTTPURLResponse else {
+            throw NSError(domain: "GoogleDrive", code: 500, userInfo: [NSLocalizedDescriptionKey: "Invalid HTTP response from Google Drive."])
+        }
+        guard (200...299).contains(http.statusCode),
+              let locationString = http.value(forHTTPHeaderField: "Location"),
               let sessionURL = URL(string: locationString) else {
-            throw NSError(domain: "GoogleDrive", code: 500, userInfo: [NSLocalizedDescriptionKey: "Failed to initiate resumable upload session with Google Drive."])
+            let errBody = String(data: data, encoding: .utf8) ?? "No error details"
+            throw NSError(domain: "GoogleDrive", code: http.statusCode, userInfo: [NSLocalizedDescriptionKey: "Google Drive upload session failed (HTTP \(http.statusCode)): \(errBody)"])
         }
 
         return sessionURL
@@ -627,7 +771,7 @@ public final class GoogleDriveService: NSObject, ObservableObject, ASWebAuthenti
         request.setValue("bytes */\(totalStr)", forHTTPHeaderField: "Content-Range")
         request.setValue("0", forHTTPHeaderField: "Content-Length")
 
-        let (data, response) = try await URLSession.shared.data(for: request)
+        let (data, response) = try await uploadSession.data(for: request)
         guard let http = response as? HTTPURLResponse else {
             throw NSError(domain: "GoogleDrive", code: 500, userInfo: [NSLocalizedDescriptionKey: "No response from Google Drive status check."])
         }
@@ -686,7 +830,7 @@ public final class GoogleDriveService: NSObject, ObservableObject, ASWebAuthenti
             }
 
             do {
-                let (data, response) = try await URLSession.shared.data(for: request)
+                let (data, response) = try await uploadSession.data(for: request)
                 guard let http = response as? HTTPURLResponse else {
                     throw NSError(domain: "GoogleDrive", code: 500, userInfo: [NSLocalizedDescriptionKey: "No response from Google Drive."])
                 }
@@ -741,7 +885,7 @@ public final class GoogleDriveService: NSObject, ObservableObject, ASWebAuthenti
         var request = URLRequest(url: listURL)
         request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
 
-        let (data, response) = try await URLSession.shared.data(for: request)
+        let (data, response) = try await uploadSession.data(for: request)
         guard let http = response as? HTTPURLResponse else {
             throw NSError(domain: "GoogleDrive", code: 500, userInfo: [NSLocalizedDescriptionKey: "No response from Google Drive."])
         }
@@ -809,7 +953,7 @@ public final class GoogleDriveService: NSObject, ObservableObject, ASWebAuthenti
         request.httpMethod = "DELETE"
         request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
 
-        let (data, response) = try await URLSession.shared.data(for: request)
+        let (data, response) = try await uploadSession.data(for: request)
         guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
             let code = (response as? HTTPURLResponse)?.statusCode ?? 500
             let msg = String(data: data, encoding: .utf8) ?? "HTTP \(code)"

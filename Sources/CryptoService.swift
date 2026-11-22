@@ -350,3 +350,94 @@ public final class CryptoService {
         }
     }
 }
+
+
+// MARK: - Zero-Disk Streaming AES-256-GCM Encryptor (AVENC02 Format)
+/// Encrypts an incoming byte stream into 1 MB AVENC02 chunks purely in RAM,
+/// enabling true 0 MB local-storage encrypted uploads to Google Drive.
+public final class StreamingAEADEncryptor {
+    private let key: SymmetricKey
+    private let baseNoncePrefix: Data
+    private let headerData: Data
+    private let chunkSize: Int = 1_048_576 // 1 MB (matches CryptoService.streamChunkSize)
+    private var buffer = Data()
+    private var chunkIndex: UInt32 = 0
+    private var headerEmitted = false
+    private let onEncryptedChunk: (Data) async throws -> Void
+
+    public init(password: String, onEncryptedChunk: @escaping (Data) async throws -> Void) throws {
+        var saltBytes = [UInt8](repeating: 0, count: 16)
+        guard SecRandomCopyBytes(kSecRandomDefault, saltBytes.count, &saltBytes) == errSecSuccess else {
+            throw CryptoError.encryptionFailed
+        }
+        var noncePrefixBytes = [UInt8](repeating: 0, count: 8)
+        guard SecRandomCopyBytes(kSecRandomDefault, noncePrefixBytes.count, &noncePrefixBytes) == errSecSuccess else {
+            throw CryptoError.encryptionFailed
+        }
+
+        let salt = Data(saltBytes)
+        self.baseNoncePrefix = Data(noncePrefixBytes)
+        self.key = try CryptoService.shared.deriveKey(from: password, salt: salt)
+
+        var hdr = Data("AVENC02\0".utf8)
+        hdr.append(salt)
+        hdr.append(self.baseNoncePrefix)
+        self.headerData = hdr
+        self.onEncryptedChunk = onEncryptedChunk
+    }
+
+    private func emitHeaderIfNeeded() async throws {
+        if !headerEmitted {
+            headerEmitted = true
+            try await onEncryptedChunk(headerData)
+        }
+    }
+
+    private func sealAndEmit(plainChunk: Data, isFinal: Bool) async throws {
+        try await emitHeaderIfNeeded()
+
+        var nonceData = baseNoncePrefix
+        var idxBE = chunkIndex.bigEndian
+        withUnsafeBytes(of: &idxBE) { nonceData.append(contentsOf: $0) }
+        let nonce = try AES.GCM.Nonce(data: nonceData)
+
+        var aad = Data()
+        withUnsafeBytes(of: &idxBE) { aad.append(contentsOf: $0) }
+        aad.append(isFinal ? 1 : 0)
+
+        let sealed = try AES.GCM.seal(plainChunk, using: key, nonce: nonce, authenticating: aad)
+        let payload = sealed.ciphertext + sealed.tag
+
+        var frame = Data(capacity: 4 + payload.count)
+        var lenBE = UInt32(payload.count).bigEndian
+        withUnsafeBytes(of: &lenBE) { frame.append(contentsOf: $0) }
+        frame.append(payload)
+
+        try await onEncryptedChunk(frame)
+        chunkIndex &+= 1
+    }
+
+    public func write(_ data: Data) async throws {
+        guard !data.isEmpty else { return }
+        buffer.append(data)
+        // Always retain at least 1 byte in buffer until finish() so we know which chunk is final
+        while buffer.count > chunkSize {
+            let slice = Data(buffer.prefix(chunkSize))
+            buffer.removeFirst(chunkSize)
+            try await sealAndEmit(plainChunk: slice, isFinal: false)
+        }
+    }
+
+    public func finish() async throws {
+        try await emitHeaderIfNeeded()
+        // Flush remaining buffered bytes as final chunk(s)
+        while buffer.count > chunkSize {
+            let slice = Data(buffer.prefix(chunkSize))
+            buffer.removeFirst(chunkSize)
+            try await sealAndEmit(plainChunk: slice, isFinal: false)
+        }
+        let finalSlice = buffer
+        buffer.removeAll(keepingCapacity: false)
+        try await sealAndEmit(plainChunk: finalSlice, isFinal: true)
+    }
+}

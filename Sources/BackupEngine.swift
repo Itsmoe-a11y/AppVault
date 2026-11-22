@@ -152,7 +152,7 @@ public final class BackupEngine {
         return record
     }
 
-    // MARK: - 2. Zero-Disk Streaming Backup to Google Drive (Strict 256 KB Chunk Alignment)
+    // MARK: - 2. True Zero-Disk Streaming Backup to Google Drive (Unencrypted & Encrypted, Strict 256 KB Alignment)
     public func createGoogleDriveStreamingBackup(
         for app: InstalledApp,
         mode: BackupMode,
@@ -163,30 +163,49 @@ public final class BackupEngine {
         note: String,
         progress: @escaping (OperationProgress) -> Void
     ) async throws -> BackupRecord {
+        await MainActor.run { UIApplication.shared.isIdleTimerDisabled = true }
+        defer { Task { @MainActor in UIApplication.shared.isIdleTimerDisabled = false } }
+
         let password = encryptionPassword?.trimmingCharacters(in: .whitespacesAndNewlines)
         let shouldEncrypt = (password != nil && !(password!.isEmpty))
         let archiveName = makeArchiveName(for: app, isEncrypted: shouldEncrypt)
 
         progress(OperationProgress(
-            stage: "Google Drive",
-            fractionCompleted: 0.05,
-            statusDetail: "Initiating cloud resumable upload session..."
+            stage: "Connecting to Google Drive",
+            fractionCompleted: 0.03,
+            statusDetail: "Validating Google Drive credentials..."
         ))
 
         let sessionURL = try await GoogleDriveService.shared.initiateResumableUpload(
             fileName: archiveName,
-            mimeType: shouldEncrypt ? "application/octet-stream" : "application/x-gzip"
+            mimeType: shouldEncrypt ? "application/octet-stream" : "application/x-gzip",
+            onStatus: { detail in
+                progress(OperationProgress(
+                    stage: "Connecting to Google Drive",
+                    fractionCompleted: 0.06,
+                    statusDetail: detail
+                ))
+            }
         )
+
+        try Task.checkCancellation()
 
         // Google Drive REQUIRES non-final chunks to be an exact multiple of 256 KB (262,144 bytes).
         // 5 MB = 20 * 262,144 bytes = 5,242,880 bytes.
         let alignedChunkSize: Int = 20 * 262_144
         var chunkBuffer = Data()
         var currentOffset: Int64 = 0
-        var totalUploadedBytes: Int64 = 0
+        let uploadStart = Date()
+
+        func formatSpeed() -> String {
+            let elapsed = max(0.25, Date().timeIntervalSince(uploadStart))
+            let mbps = (Double(currentOffset) / 1_048_576.0) / elapsed
+            return String(format: "%.1f MB/s", mbps)
+        }
 
         func flushAlignedChunks() async throws {
             while chunkBuffer.count >= alignedChunkSize {
+                try Task.checkCancellation()
                 let toUpload = Data(chunkBuffer.prefix(alignedChunkSize))
                 chunkBuffer.removeFirst(alignedChunkSize)
 
@@ -198,128 +217,85 @@ public final class BackupEngine {
                     totalFileSize: nil
                 )
                 currentOffset += Int64(toUpload.count)
-                totalUploadedBytes += Int64(toUpload.count)
+                progress(OperationProgress(
+                    stage: shouldEncrypt ? "Encrypting & Uploading" : "Cloud Streaming",
+                    fractionCompleted: min(0.90, 0.12 + Double(currentOffset % (100 * 1_048_576)) / Double(120 * 1_048_576)),
+                    statusDetail: "Uploaded \(ByteCountFormatter.string(fromByteCount: currentOffset, countStyle: .file)) (\(formatSpeed())) • 0 MB local disk used"
+                ))
             }
         }
 
-        var record: BackupRecord
-
+        // Optional 0-disk in-RAM chunked AES-256-GCM encryptor piped straight into the 5 MB Drive buffer
+        var streamEncryptor: StreamingAEADEncryptor? = nil
         if shouldEncrypt, let pwd = password {
-            // Stream-compress to temp, stream-encrypt to temp, then stream-upload in exact 5 MB chunks
-            let tempPlain = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("AppVault_GDPlain_\(UUID().uuidString).adbk")
-            let tempEnc = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("AppVault_GDEnc_\(UUID().uuidString).enc.adbk")
-            defer {
-                try? fileManager.removeItem(at: tempPlain)
-                try? fileManager.removeItem(at: tempEnc)
+            streamEncryptor = try StreamingAEADEncryptor(password: pwd) { encryptedFrame in
+                chunkBuffer.append(encryptedFrame)
+                try await flushAlignedChunks()
             }
+        }
 
-            fileManager.createFile(atPath: tempPlain.path, contents: nil, attributes: nil)
-            guard let plainHandle = try? FileHandle(forWritingTo: tempPlain) else {
-                throw NSError(domain: "AppVault.BackupEngine", code: 500, userInfo: [NSLocalizedDescriptionKey: "Failed to prepare temporary staging file for encrypted upload."])
-            }
-            defer { try? plainHandle.close() }
+        progress(OperationProgress(
+            stage: "Scanning App Files",
+            fractionCompleted: 0.10,
+            statusDetail: "Cataloging \(app.name) container before streaming..."
+        ))
 
-            record = try await StreamingArchiveEngine.shared.streamBackup(
-                for: app,
-                mode: mode,
-                includeCaches: includeCaches,
-                includeKeychain: includeKeychain,
-                includeAppGroups: includeAppGroups,
-                note: note,
-                onProgress: { p in
-                    progress(OperationProgress(
-                        stage: "Compressing",
-                        fractionCompleted: min(0.45, p.fractionCompleted * 0.45),
-                        statusDetail: p.statusDetail
-                    ))
-                }
-            ) { chunk in
-                try plainHandle.write(contentsOf: chunk)
-            }
-            try? plainHandle.close()
-
-            progress(OperationProgress(
-                stage: "Encrypting Archive",
-                fractionCompleted: 0.50,
-                statusDetail: "Encrypting backup with AES-256-GCM..."
-            ))
-            try CryptoService.shared.encryptFile(at: tempPlain, to: tempEnc, password: pwd)
-            try? fileManager.removeItem(at: tempPlain)
-
-            let encAttrs = try? fileManager.attributesOfItem(atPath: tempEnc.path)
-            let encTotalSize = (encAttrs?[.size] as? Int64) ?? 0
-
-            guard let encReader = try? FileHandle(forReadingFrom: tempEnc) else {
-                throw NSError(domain: "AppVault.BackupEngine", code: 500, userInfo: [NSLocalizedDescriptionKey: "Failed to read encrypted archive for cloud upload."])
-            }
-            defer { try? encReader.close() }
-
-            while let piece = try encReader.read(upToCount: alignedChunkSize), !piece.isEmpty {
-                let isLast = (currentOffset + Int64(piece.count) >= encTotalSize)
-                _ = try await GoogleDriveService.shared.uploadChunk(
-                    sessionURL: sessionURL,
-                    chunkData: piece,
-                    startOffset: currentOffset,
-                    isFinal: isLast,
-                    totalFileSize: isLast ? encTotalSize : nil
-                )
-                currentOffset += Int64(piece.count)
-                totalUploadedBytes += Int64(piece.count)
-
-                let uploadFrac = encTotalSize > 0 ? Double(currentOffset) / Double(encTotalSize) : 1.0
+        var record = try await StreamingArchiveEngine.shared.streamBackup(
+            for: app,
+            mode: mode,
+            includeCaches: includeCaches,
+            includeKeychain: includeKeychain,
+            includeAppGroups: includeAppGroups,
+            note: note,
+            onProgress: { p in
+                let uploadedStr = ByteCountFormatter.string(fromByteCount: currentOffset, countStyle: .file)
+                let detail = currentOffset > 0
+                    ? "\(p.statusDetail) • \(uploadedStr) uploaded (\(formatSpeed()))"
+                    : p.statusDetail
                 progress(OperationProgress(
-                    stage: "Uploading Encrypted Backup",
-                    fractionCompleted: min(0.98, 0.55 + uploadFrac * 0.43),
-                    statusDetail: "Uploaded \(ByteCountFormatter.string(fromByteCount: currentOffset, countStyle: .file)) / \(ByteCountFormatter.string(fromByteCount: encTotalSize, countStyle: .file))"
+                    stage: shouldEncrypt ? "Encrypting & Streaming" : "Cloud Streaming",
+                    fractionCompleted: min(0.90, max(0.12, p.fractionCompleted * 0.85)),
+                    statusDetail: detail
                 ))
             }
-        } else {
-            record = try await StreamingArchiveEngine.shared.streamBackup(
-                for: app,
-                mode: mode,
-                includeCaches: includeCaches,
-                includeKeychain: includeKeychain,
-                includeAppGroups: includeAppGroups,
-                note: note,
-                onProgress: { p in
-                    progress(OperationProgress(
-                        stage: "Cloud Streaming",
-                        fractionCompleted: min(0.85, p.fractionCompleted),
-                        statusDetail: "Compressing & uploading to Google Drive (\(ByteCountFormatter.string(fromByteCount: currentOffset, countStyle: .file)) uploaded)..."
-                    ))
-                }
-            ) { compressedChunk in
+        ) { compressedChunk in
+            try Task.checkCancellation()
+            if let encryptor = streamEncryptor {
+                try await encryptor.write(compressedChunk)
+            } else {
                 chunkBuffer.append(compressedChunk)
                 try await flushAlignedChunks()
             }
-
-            // Finalize upload with remaining tail bytes (or empty finalize range if exact multiple of 5 MB)
-            progress(OperationProgress(
-                stage: "Finishing Upload",
-                fractionCompleted: 0.95,
-                statusDetail: "Finalizing cloud archive..."
-            ))
-
-            let finalTotalSize = currentOffset + Int64(chunkBuffer.count)
-            _ = try await GoogleDriveService.shared.uploadChunk(
-                sessionURL: sessionURL,
-                chunkData: chunkBuffer,
-                startOffset: currentOffset,
-                isFinal: true,
-                totalFileSize: finalTotalSize
-            )
-            totalUploadedBytes = finalTotalSize
         }
 
+        if let encryptor = streamEncryptor {
+            try await encryptor.finish()
+        }
+
+        progress(OperationProgress(
+            stage: "Finishing Upload",
+            fractionCompleted: 0.95,
+            statusDetail: "Finalizing Google Drive archive..."
+        ))
+
+        let finalTotalSize = currentOffset + Int64(chunkBuffer.count)
+        _ = try await GoogleDriveService.shared.uploadChunk(
+            sessionURL: sessionURL,
+            chunkData: chunkBuffer,
+            startOffset: currentOffset,
+            isFinal: true,
+            totalFileSize: finalTotalSize
+        )
+
         record.archiveFileName = archiveName
-        record.fileSizeBytes = totalUploadedBytes
+        record.fileSizeBytes = finalTotalSize
         record.isEncrypted = shouldEncrypt
 
         let folderLabel = await MainActor.run { GoogleDriveService.shared.targetFolderName }
         progress(OperationProgress(
             stage: "Upload Complete",
             fractionCompleted: 1.0,
-            statusDetail: "Cloud backup finished! Stored in Google Drive / \(folderLabel) (\(record.formattedSize)).",
+            statusDetail: "Uploaded \(record.formattedSize) to Google Drive / \(folderLabel) with 0 MB local disk used.",
             isCompleted: true
         ))
 
