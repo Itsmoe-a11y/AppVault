@@ -106,6 +106,8 @@ jobs:
                - Encrypts streaming backup chunks purely in RAM on-the-fly directly to Google Drive (0 MB local disk usage).
             6. 📲 **TrollStore iOS 16 Export Coordinator & Filza**:
                - Staged APFS hardlinks with safe POSIX permissions preventing white-screen/XPC crashes when sharing backups.
+            7. ⚡ **Thread Pool Concurrency Optimization**:
+               - Offloaded synchronous POSIX directory sizing to a dedicated utility GCD queue, preventing Swift cooperative pool starvation during background streaming.
 
             ### Installation:
             - **TrollStore**: Download `AppVault.tipa` (or `AppVault.ipa`) and open in TrollStore.

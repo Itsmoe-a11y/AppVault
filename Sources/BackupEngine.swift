@@ -1,4 +1,5 @@
 import Foundation
+import Darwin
 import UIKit
 import CryptoKit
 
@@ -12,15 +13,21 @@ public final class BackupEngine {
     public var backupsDirectory: URL {
         let rootMobile = URL(fileURLWithPath: "/var/mobile/Documents/AppVaultBackups", isDirectory: true)
         if fileManager.isWritableFile(atPath: "/var/mobile/Documents") {
-            try? fileManager.createDirectory(at: rootMobile, withIntermediateDirectories: true)
-            PosixHelper.shared.fixPermissions(at: rootMobile.path)
+            if !fileManager.fileExists(atPath: rootMobile.path) {
+                try? fileManager.createDirectory(at: rootMobile, withIntermediateDirectories: true)
+                lchown(rootMobile.path, 501, 501)
+                chmod(rootMobile.path, 0o755)
+            }
             return rootMobile
         }
 
         if let docs = fileManager.urls(for: .documentDirectory, in: .userDomainMask).first {
             let localBackups = docs.appendingPathComponent("Backups", isDirectory: true)
-            try? fileManager.createDirectory(at: localBackups, withIntermediateDirectories: true)
-            PosixHelper.shared.fixPermissions(at: localBackups.path)
+            if !fileManager.fileExists(atPath: localBackups.path) {
+                try? fileManager.createDirectory(at: localBackups, withIntermediateDirectories: true)
+                lchown(localBackups.path, 501, 501)
+                chmod(localBackups.path, 0o755)
+            }
             return localBackups
         }
 
@@ -30,8 +37,10 @@ public final class BackupEngine {
     }
 
     private init() {
-        try? fileManager.createDirectory(at: backupsDirectory, withIntermediateDirectories: true)
-        PosixHelper.shared.fixPermissions(at: backupsDirectory.path)
+        let dir = backupsDirectory
+        try? fileManager.createDirectory(at: dir, withIntermediateDirectories: true)
+        lchown(dir.path, 501, 501)
+        chmod(dir.path, 0o755)
     }
 
     private func makeArchiveName(for app: InstalledApp, isEncrypted: Bool) -> String {

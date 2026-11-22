@@ -260,14 +260,20 @@ public struct BatchBackupSheet: View {
         results.removeAll()
         currentProgress = 0.0
 
+        let targetApps = apps
+        let destination = selectedDestination
+        let mode = selectedMode
+        let caches = includeCaches
+        let keychain = includeKeychain
+        let groups = includeAppGroups
         let password = enableEncryption ? encryptionPassword : nil
         let retentionLimit = SettingsViewModel.savedMaxBackupsPerApp
 
-        batchTask = Task.detached(priority: .userInitiated) {
-            let total = self.apps.count
+        batchTask = Task(priority: .userInitiated) {
+            let total = targetApps.count
             var wasCancelled = false
 
-            for (idx, target) in self.apps.enumerated() {
+            for (idx, target) in targetApps.enumerated() {
                 if Task.isCancelled {
                     wasCancelled = true
                     break
@@ -281,13 +287,13 @@ public struct BatchBackupSheet: View {
                 }
 
                 do {
-                    if self.selectedDestination == .googleDrive {
+                    if destination == .googleDrive {
                         _ = try await BackupEngine.shared.createGoogleDriveStreamingBackup(
                             for: target,
-                            mode: self.selectedMode,
-                            includeCaches: self.includeCaches,
-                            includeKeychain: self.includeKeychain,
-                            includeAppGroups: self.includeAppGroups,
+                            mode: mode,
+                            includeCaches: caches,
+                            includeKeychain: keychain,
+                            includeAppGroups: groups,
                             encryptionPassword: password,
                             note: "Batch Backup"
                         ) { p in
@@ -295,13 +301,13 @@ public struct BatchBackupSheet: View {
                                 self.statusLog = p.statusDetail
                             }
                         }
-                    } else if self.selectedDestination == .webdav {
+                    } else if destination == .webdav {
                         _ = try await BackupEngine.shared.createWebDAVStreamingBackup(
                             for: target,
-                            mode: self.selectedMode,
-                            includeCaches: self.includeCaches,
-                            includeKeychain: self.includeKeychain,
-                            includeAppGroups: self.includeAppGroups,
+                            mode: mode,
+                            includeCaches: caches,
+                            includeKeychain: keychain,
+                            includeAppGroups: groups,
                             encryptionPassword: password,
                             note: "Batch Backup"
                         ) { p in
@@ -312,10 +318,10 @@ public struct BatchBackupSheet: View {
                     } else {
                         _ = try await BackupEngine.shared.createStreamingBackup(
                             for: target,
-                            mode: self.selectedMode,
-                            includeCaches: self.includeCaches,
-                            includeKeychain: self.includeKeychain,
-                            includeAppGroups: self.includeAppGroups,
+                            mode: mode,
+                            includeCaches: caches,
+                            includeKeychain: keychain,
+                            includeAppGroups: groups,
                             encryptionPassword: password,
                             note: "Batch Backup"
                         ) { p in

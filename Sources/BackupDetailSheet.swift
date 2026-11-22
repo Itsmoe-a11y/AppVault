@@ -23,6 +23,8 @@ public struct BackupDetailSheet: View {
     @State private var executionError: String? = nil
     @State private var completedRecord: BackupRecord? = nil
     @State private var activeTask: Task<Void, Never>? = nil
+    @State private var sizingTask: Task<Void, Never>? = nil
+    @State private var showDebugLogs: Bool = false
 
     public init(app: InstalledApp) {
         self.app = app
@@ -253,6 +255,12 @@ public struct BackupDetailSheet: View {
                             Text(error)
                                 .font(.caption)
                                 .foregroundColor(.secondary)
+                            Button(action: { showDebugLogs = true }) {
+                                Label("View Debug Logs", systemImage: "ladybug.fill")
+                                    .font(.caption)
+                            }
+                            .buttonStyle(BorderlessButtonStyle())
+                            .padding(.top, 2)
                         }
                         .padding(.vertical, 4)
                     }
@@ -313,16 +321,22 @@ public struct BackupDetailSheet: View {
                                 ProgressView("Starting zero-staging stream...")
                             }
 
-                            Button(role: .destructive, action: cancelBackup) {
-                                HStack {
-                                    Spacer()
+                            HStack(spacing: 16) {
+                                Button(action: { showDebugLogs = true }) {
+                                    Label("Live Logs", systemImage: "ladybug.fill")
+                                        .font(.subheadline)
+                                }
+                                .buttonStyle(BorderlessButtonStyle())
+
+                                Spacer()
+
+                                Button(role: .destructive, action: cancelBackup) {
                                     Label("Cancel Backup", systemImage: "stop.circle.fill")
                                         .font(.subheadline)
                                         .foregroundColor(.red)
-                                    Spacer()
                                 }
+                                .buttonStyle(BorderlessButtonStyle())
                             }
-                            .buttonStyle(BorderlessButtonStyle())
                             .padding(.top, 4)
                         }
                         .padding(.vertical, 8)
@@ -356,9 +370,15 @@ public struct BackupDetailSheet: View {
             }
             .onAppear {
                 if !currentApp.isSized || (currentApp.appSizeBytes == 0 && currentApp.dataSizeBytes == 0) {
-                    activeTask?.cancel()
-        activeTask = Task.detached(priority: .userInitiated) {
-                        let sizes = AppDiscoveryService.shared.calculateAppSizes(for: currentApp, forceRefresh: true)
+                    let targetApp = currentApp
+                    sizingTask?.cancel()
+                    sizingTask = Task {
+                        let sizes: (appSize: Int64, dataSize: Int64, groupSize: Int64) = await withCheckedContinuation { continuation in
+                            DispatchQueue.global(qos: .utility).async {
+                                continuation.resume(returning: AppDiscoveryService.shared.calculateAppSizes(for: targetApp, forceRefresh: true))
+                            }
+                        }
+                        guard !Task.isCancelled else { return }
                         await MainActor.run {
                             currentApp.appSizeBytes = sizes.appSize
                             currentApp.dataSizeBytes = sizes.dataSize
@@ -367,6 +387,20 @@ public struct BackupDetailSheet: View {
                         }
                     }
                 }
+            }
+            .onDisappear {
+                sizingTask?.cancel()
+            }
+            .sheet(isPresented: $showDebugLogs) {
+                NavigationView {
+                    DebugLogsView()
+                        .toolbar {
+                            ToolbarItem(placement: .cancellationAction) {
+                                Button("Close") { showDebugLogs = false }
+                            }
+                        }
+                }
+                .navigationViewStyle(StackNavigationViewStyle())
             }
         }
         .navigationViewStyle(StackNavigationViewStyle())
@@ -377,30 +411,45 @@ public struct BackupDetailSheet: View {
         activeTask?.cancel()
         activeTask = nil
         isExecuting = false
+        DebugLogger.shared.log("Backup", "Backup cancelled by user.", level: .warning)
         executionError = "Backup cancelled by user."
     }
 
     private func startBackup() {
-        isExecuting = true
-        executionError = nil
-        completedRecord = nil
-        currentProgress = OperationProgress(stage: "Initializing", fractionCompleted: 0.0, statusDetail: "Preparing stream...")
-
+        // Snapshot all SwiftUI @State properties on MainActor before entering async execution
+        let destination = selectedDestination
+        let targetApp = currentApp
+        let mode = selectedMode
+        let caches = includeCaches
+        let keychain = includeKeychain
+        let groups = includeAppGroups
+        let backupNote = note
         let password = enableEncryption ? encryptionPassword : nil
         let retentionLimit = SettingsViewModel.savedMaxBackupsPerApp
 
+        isExecuting = true
+        executionError = nil
+        completedRecord = nil
+        currentProgress = OperationProgress(
+            stage: destination == .googleDrive ? "Connecting to Google Drive" : "Initializing",
+            fractionCompleted: 0.02,
+            statusDetail: destination == .googleDrive ? "Starting Google Drive upload pipeline..." : "Preparing stream..."
+        )
+        DebugLogger.shared.log("Backup", "User tapped Start Backup for \(targetApp.name) -> \(destination.rawValue) (mode=\(mode.rawValue), encrypted=\(password != nil && !(password!.isEmpty)))")
+
+        sizingTask?.cancel()
         activeTask?.cancel()
-        activeTask = Task.detached(priority: .userInitiated) {
+        activeTask = Task(priority: .userInitiated) {
             do {
-                if self.selectedDestination == .googleDrive {
+                if destination == .googleDrive {
                     let record = try await BackupEngine.shared.createGoogleDriveStreamingBackup(
-                        for: self.currentApp,
-                        mode: self.selectedMode,
-                        includeCaches: self.includeCaches,
-                        includeKeychain: self.includeKeychain,
-                        includeAppGroups: self.includeAppGroups,
+                        for: targetApp,
+                        mode: mode,
+                        includeCaches: caches,
+                        includeKeychain: keychain,
+                        includeAppGroups: groups,
                         encryptionPassword: password,
-                        note: self.note
+                        note: backupNote
                     ) { progress in
                         Task { @MainActor in
                             self.currentProgress = progress
@@ -412,15 +461,15 @@ public struct BackupDetailSheet: View {
                         self.completedRecord = record
                         self.backupsVM.refreshCloudBackups()
                     }
-                } else if self.selectedDestination == .webdav {
+                } else if destination == .webdav {
                     let record = try await BackupEngine.shared.createWebDAVStreamingBackup(
-                        for: self.currentApp,
-                        mode: self.selectedMode,
-                        includeCaches: self.includeCaches,
-                        includeKeychain: self.includeKeychain,
-                        includeAppGroups: self.includeAppGroups,
+                        for: targetApp,
+                        mode: mode,
+                        includeCaches: caches,
+                        includeKeychain: keychain,
+                        includeAppGroups: groups,
                         encryptionPassword: password,
-                        note: self.note
+                        note: backupNote
                     ) { progress in
                         Task { @MainActor in
                             self.currentProgress = progress
@@ -434,13 +483,13 @@ public struct BackupDetailSheet: View {
                     }
                 } else {
                     let record = try await BackupEngine.shared.createStreamingBackup(
-                        for: self.currentApp,
-                        mode: self.selectedMode,
-                        includeCaches: self.includeCaches,
-                        includeKeychain: self.includeKeychain,
-                        includeAppGroups: self.includeAppGroups,
+                        for: targetApp,
+                        mode: mode,
+                        includeCaches: caches,
+                        includeKeychain: keychain,
+                        includeAppGroups: groups,
                         encryptionPassword: password,
-                        note: self.note
+                        note: backupNote
                     ) { progress in
                         Task { @MainActor in
                             self.currentProgress = progress
@@ -448,7 +497,7 @@ public struct BackupDetailSheet: View {
                     }
 
                     if retentionLimit > 0 {
-                        BackupEngine.shared.pruneOldBackups(for: self.currentApp.bundleIdentifier, keepNewest: retentionLimit)
+                        BackupEngine.shared.pruneOldBackups(for: targetApp.bundleIdentifier, keepNewest: retentionLimit)
                     }
 
                     await MainActor.run {
@@ -464,7 +513,7 @@ public struct BackupDetailSheet: View {
             } catch {
                 await MainActor.run {
                     self.isExecuting = false
-                    DebugLogger.shared.log("Backup", "Backup failed for \(self.currentApp.name): \(error.localizedDescription)", level: .error)
+                    DebugLogger.shared.log("Backup", "Backup failed for \(targetApp.name): \(error.localizedDescription)", level: .error)
                     self.executionError = error.localizedDescription
                 }
             }

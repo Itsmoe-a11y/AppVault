@@ -618,9 +618,11 @@ public final class GoogleDriveService: NSObject, ObservableObject, ASWebAuthenti
             return "\(encKey)=\(encVal)"
         }.joined(separator: "&")
 
+        request.timeoutInterval = 30
         request.httpBody = bodyString.data(using: .utf8)
 
-        let (data, response) = try await uploadSession.data(for: request)
+        DebugLogger.shared.log("OAuth", "Refreshing Google Drive access token (clientId=\(clientId.prefix(16))...)")
+        let (data, response) = try await apiSession.data(for: request)
         guard let http = response as? HTTPURLResponse, http.statusCode == 200,
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let newAccess = json["access_token"] as? String else {
@@ -636,6 +638,7 @@ public final class GoogleDriveService: NSObject, ObservableObject, ASWebAuthenti
             self.tokenExpiry = Date().addingTimeInterval(3500)
         }
 
+        DebugLogger.shared.log("OAuth", "Google Drive access token refreshed successfully.", level: .success)
         return newAccess
     }
 
@@ -684,8 +687,13 @@ public final class GoogleDriveService: NSObject, ObservableObject, ASWebAuthenti
     }
 
     // MARK: - Get or Create Target Folder in Google Drive
-    public func getOrCreateAppFolder() async throws -> String {
-        let token = try await ensureValidToken()
+    public func getOrCreateAppFolder(using existingToken: String? = nil) async throws -> String {
+        let token: String
+        if let existing = existingToken, !existing.isEmpty {
+            token = existing
+        } else {
+            token = try await ensureValidToken()
+        }
         let cleanPath = targetFolderName.trimmingCharacters(in: .whitespacesAndNewlines)
         let effectivePath = cleanPath.isEmpty ? "AppVault Backups" : cleanPath
 
@@ -725,6 +733,7 @@ public final class GoogleDriveService: NSObject, ObservableObject, ASWebAuthenti
         }
 
         var listReq = URLRequest(url: listURL)
+        listReq.timeoutInterval = 30
         listReq.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
 
         let (data, listRes) = try await apiSession.data(for: listReq)
@@ -745,6 +754,7 @@ public final class GoogleDriveService: NSObject, ObservableObject, ASWebAuthenti
 
         var createReq = URLRequest(url: createURL)
         createReq.httpMethod = "POST"
+        createReq.timeoutInterval = 30
         createReq.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         createReq.setValue("application/json; charset=UTF-8", forHTTPHeaderField: "Content-Type")
 
@@ -780,7 +790,9 @@ public final class GoogleDriveService: NSObject, ObservableObject, ASWebAuthenti
         let token = try await ensureValidToken()
 
         onStatus?("Locating Google Drive folder '\(targetFolderName)'...")
-        let folderID = try await getOrCreateAppFolder()
+        DebugLogger.shared.log("GoogleDrive", "Resolving folder path '\(targetFolderName)'...")
+        let folderID = try await getOrCreateAppFolder(using: token)
+        DebugLogger.shared.log("GoogleDrive", "Resolved folder '\(targetFolderName)' -> id=\(folderID)")
 
         onStatus?("Opening Google Drive resumable upload session...")
         guard let uploadURL = URL(string: "https://www.googleapis.com/upload/drive/v3/files?uploadType=resumable") else {

@@ -124,7 +124,11 @@ public final class AppsViewModel: ObservableObject {
         isScanning = true
 
         scanTask = Task.detached(priority: .userInitiated) {
-            let discovered = AppDiscoveryService.shared.fetchInstalledApps()
+            let discovered: [InstalledApp] = await withCheckedContinuation { continuation in
+                DispatchQueue.global(qos: .userInitiated).async {
+                    continuation.resume(returning: AppDiscoveryService.shared.fetchInstalledApps())
+                }
+            }
             guard !Task.isCancelled else {
                 await MainActor.run { self.isScanning = false }
                 return
@@ -152,19 +156,29 @@ public final class AppsViewModel: ObservableObject {
                 return
             }
 
-            // High-throughput sliding-window worker pool (6 concurrent workers)
-            // Eliminates head-of-line blocking so large apps never freeze other apps
-            let maxWorkers = 6
+            // Offload synchronous POSIX directory sizing onto a dedicated utility GCD queue
+            // so we NEVER starve Swift's cooperative thread pool (which previously froze streaming backups on "Initializing")
+            let sizingQueue = DispatchQueue(label: "dev.moe.appvault.sizing", qos: .utility, attributes: .concurrent)
+            let maxWorkers = 2
             var nextToSubmit = 0
 
+            func sizeOnUtilityQueue(_ targetApp: InstalledApp) async -> (Int64, Int64, Int64) {
+                await withCheckedContinuation { continuation in
+                    sizingQueue.async {
+                        let sizes = AppDiscoveryService.shared.calculateAppSizes(for: targetApp)
+                        continuation.resume(returning: (sizes.appSize, sizes.dataSize, sizes.groupSize))
+                    }
+                }
+            }
+
             await withTaskGroup(of: (Int, Int64, Int64, Int64).self) { group in
-                // Initial saturation of worker pool
+                // Initial worker window
                 while nextToSubmit < orderedIndices.count && nextToSubmit < maxWorkers {
                     let idx = orderedIndices[nextToSubmit]
                     let app = currentApps[idx]
                     group.addTask {
-                        let sizes = AppDiscoveryService.shared.calculateAppSizes(for: app)
-                        return (idx, sizes.appSize, sizes.dataSize, sizes.groupSize)
+                        let sizes = await sizeOnUtilityQueue(app)
+                        return (idx, sizes.0, sizes.1, sizes.2)
                     }
                     nextToSubmit += 1
                 }
@@ -182,13 +196,12 @@ public final class AppsViewModel: ObservableObject {
                     currentApps[idx].isSized = true
                     completedBatchCount += 1
 
-                    // Immediately dispatch the next app so the worker thread is never idle
                     if nextToSubmit < orderedIndices.count {
                         let nextIdx = orderedIndices[nextToSubmit]
                         let nextApp = currentApps[nextIdx]
                         group.addTask {
-                            let sizes = AppDiscoveryService.shared.calculateAppSizes(for: nextApp)
-                            return (nextIdx, sizes.appSize, sizes.dataSize, sizes.groupSize)
+                            let sizes = await sizeOnUtilityQueue(nextApp)
+                            return (nextIdx, sizes.0, sizes.1, sizes.2)
                         }
                         nextToSubmit += 1
                     }
