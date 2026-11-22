@@ -8,7 +8,7 @@ public struct BackupDetailSheet: View {
     @ObservedObject var webdav = WebDAVService.shared
 
     @State private var selectedMode: BackupMode
-    @State private var selectedDestination: BackupDestination = .local
+    @State private var selectedDestination: BackupDestination
     @State private var includeKeychain: Bool = true
     @State private var includeAppGroups: Bool = true
     @State private var includeCaches: Bool
@@ -26,11 +26,44 @@ public struct BackupDetailSheet: View {
     @State private var sizingTask: Task<Void, Never>? = nil
     @State private var showDebugLogs: Bool = false
 
+    private static func availableLocalDiskSpaceBytes() -> Int64 {
+        let probeURL = URL(fileURLWithPath: "/var/mobile")
+        if let vals = try? probeURL.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey, .volumeAvailableCapacityKey]) {
+            if let important = vals.volumeAvailableCapacityForImportantUsage, important > 0 {
+                return important
+            }
+            if let regular = vals.volumeAvailableCapacity, regular > 0 {
+                return Int64(regular)
+            }
+        }
+        return Int64.max
+    }
+
     public init(app: InstalledApp) {
         self.app = app
         _currentApp = State(initialValue: app)
         _selectedMode = State(initialValue: SettingsViewModel.savedDefaultBackupMode)
         _includeCaches = State(initialValue: SettingsViewModel.savedDefaultIncludeCaches)
+
+        // Restore last chosen destination, or auto-select Google Drive when authenticated & local iPhone space is tight
+        let savedRaw = UserDefaults.standard.string(forKey: "appvault_last_backup_destination")
+        var initialDest: BackupDestination = .local
+        if let raw = savedRaw, let saved = BackupDestination(rawValue: raw) {
+            if saved == .googleDrive && GoogleDriveService.shared.isAuthenticated {
+                initialDest = .googleDrive
+            } else if saved == .webdav && WebDAVService.shared.isConfigured {
+                initialDest = .webdav
+            } else {
+                initialDest = .local
+            }
+        } else if GoogleDriveService.shared.isAuthenticated {
+            let estimatedBytes = app.dataSizeBytes + app.groupSizeBytes + app.appSizeBytes
+            let freeBytes = Self.availableLocalDiskSpaceBytes()
+            if estimatedBytes > 0 && estimatedBytes > (freeBytes / 2) {
+                initialDest = .googleDrive
+            }
+        }
+        _selectedDestination = State(initialValue: initialDest)
     }
 
     private var isActionDisabled: Bool {
@@ -43,11 +76,11 @@ public struct BackupDetailSheet: View {
     private var actionButtonTitle: String {
         switch selectedDestination {
         case .googleDrive:
-            return enableEncryption ? "Encrypt & Upload to Google Drive" : "Stream Direct to Google Drive"
+            return enableEncryption ? "Encrypt & Stream to Google Drive" : "Stream Direct to Google Drive (0 MB Disk)"
         case .webdav:
-            return enableEncryption ? "Encrypt & Upload to WebDAV" : "Stream Backup to WebDAV"
+            return enableEncryption ? "Encrypt & Upload to WebDAV" : "Upload Backup to WebDAV"
         case .local:
-            return enableEncryption ? "Create Encrypted Backup" : "Create Streaming Backup"
+            return enableEncryption ? "Save Encrypted Backup to iPhone" : "Save Backup to iPhone Storage"
         }
     }
 
@@ -157,14 +190,72 @@ public struct BackupDetailSheet: View {
                         .padding(.vertical, 2)
                     }
 
-                    // Section 4: Destination
+                    // Section 4: Destination (Direct tap rows — avoids iOS 16.0 MenuPickerStyle selection bugs inside Form)
                     Section(header: Text("Destination")) {
-                        Picker("Destination", selection: $selectedDestination) {
-                            ForEach(BackupDestination.allCases) { dest in
-                                Text(dest.title).tag(dest)
+                        ForEach(BackupDestination.allCases) { dest in
+                            Button(action: {
+                                selectedDestination = dest
+                                UserDefaults.standard.set(dest.rawValue, forKey: "appvault_last_backup_destination")
+                                DebugLogger.shared.log("Backup", "Destination selected: \(dest.rawValue)")
+                            }) {
+                                HStack(spacing: 12) {
+                                    Image(systemName: dest.iconName)
+                                        .font(.system(size: 16, weight: .semibold))
+                                        .foregroundColor(selectedDestination == dest ? .blue : .secondary)
+                                        .frame(width: 24)
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text(dest.title)
+                                            .font(.system(size: 15, weight: selectedDestination == dest ? .semibold : .regular))
+                                            .foregroundColor(.primary)
+                                        Text(dest == .googleDrive
+                                             ? "Direct cloud stream • 0 MB iPhone storage used"
+                                             : (dest == .webdav ? "Uploads archive to your WebDAV server" : "Saves .adbk file to local iPhone storage"))
+                                            .font(.caption2)
+                                            .foregroundColor(dest == .googleDrive ? .blue : .secondary)
+                                    }
+                                    Spacer()
+                                    if selectedDestination == dest {
+                                        Image(systemName: "checkmark.circle.fill")
+                                            .foregroundColor(.blue)
+                                            .font(.system(size: 18))
+                                    } else {
+                                        Image(systemName: "circle")
+                                            .foregroundColor(.secondary.opacity(0.4))
+                                            .font(.system(size: 18))
+                                    }
+                                }
+                                .contentShape(Rectangle())
+                                .padding(.vertical, 2)
+                            }
+                            .buttonStyle(PlainButtonStyle())
+                        }
+
+                        if selectedDestination == .local {
+                            let estimatedBytes = (selectedMode == .full ? currentApp.appSizeBytes : 0) + currentApp.dataSizeBytes + (includeAppGroups ? currentApp.groupSizeBytes : 0)
+                            let freeBytes = Self.availableLocalDiskSpaceBytes()
+                            if freeBytes < Int64.max && estimatedBytes > 0 && Double(estimatedBytes) * 0.7 > Double(freeBytes) {
+                                VStack(alignment: .leading, spacing: 6) {
+                                    HStack(alignment: .top, spacing: 6) {
+                                        Image(systemName: "exclamationmark.triangle.fill")
+                                            .foregroundColor(.orange)
+                                        Text("Low iPhone storage: \(ByteCountFormatter.string(fromByteCount: freeBytes, countStyle: .file)) free, app is ~\(ByteCountFormatter.string(fromByteCount: estimatedBytes, countStyle: .file)). Switch to Google Drive to stream with 0 MB local disk.")
+                                            .font(.caption)
+                                            .foregroundColor(.orange)
+                                    }
+                                    if googleDrive.isAuthenticated {
+                                        Button(action: {
+                                            selectedDestination = .googleDrive
+                                            UserDefaults.standard.set(BackupDestination.googleDrive.rawValue, forKey: "appvault_last_backup_destination")
+                                        }) {
+                                            Label("Switch to Google Drive (0 MB Local Disk)", systemImage: "icloud.and.arrow.up.fill")
+                                                .font(.caption.bold())
+                                        }
+                                        .buttonStyle(BorderlessButtonStyle())
+                                    }
+                                }
+                                .padding(.vertical, 2)
                             }
                         }
-                        .pickerStyle(MenuPickerStyle())
 
                         if selectedDestination == .webdav {
                             if webdav.isConfigured {
@@ -298,8 +389,16 @@ public struct BackupDetailSheet: View {
                         .padding(.vertical, 6)
                     }
                 } else if isExecuting {
-                    Section(header: Text("Creating Archive")) {
+                    Section(header: Text(selectedDestination == .googleDrive ? "Streaming to Google Drive (0 MB Local Disk)" : (selectedDestination == .webdav ? "Uploading to WebDAV" : "Saving to iPhone Storage"))) {
                         VStack(spacing: 12) {
+                            HStack(spacing: 6) {
+                                Image(systemName: selectedDestination.iconName)
+                                    .foregroundColor(selectedDestination == .googleDrive ? .green : .blue)
+                                Text("Target: \(selectedDestination.title)")
+                                    .font(.caption.bold())
+                                    .foregroundColor(selectedDestination == .googleDrive ? .green : .primary)
+                                Spacer()
+                            }
                             if let progress = currentProgress {
                                 HStack {
                                     Text(progress.stage)

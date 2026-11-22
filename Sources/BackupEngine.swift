@@ -205,6 +205,7 @@ public final class BackupEngine {
         let alignedChunkSize: Int = 20 * 262_144
         var chunkBuffer = Data()
         var currentOffset: Int64 = 0
+        var lastStreamFraction: Double = 0.12
         let uploadStart = Date()
 
         func formatSpeed() -> String {
@@ -229,7 +230,7 @@ public final class BackupEngine {
                 currentOffset += Int64(toUpload.count)
                 progress(OperationProgress(
                     stage: shouldEncrypt ? "Encrypting & Uploading" : "Cloud Streaming",
-                    fractionCompleted: min(0.90, 0.12 + Double(currentOffset % (100 * 1_048_576)) / Double(120 * 1_048_576)),
+                    fractionCompleted: min(0.94, max(0.12, lastStreamFraction)),
                     statusDetail: "Uploaded \(ByteCountFormatter.string(fromByteCount: currentOffset, countStyle: .file)) (\(formatSpeed())) • 0 MB local disk used"
                 ))
             }
@@ -258,13 +259,14 @@ public final class BackupEngine {
             includeAppGroups: includeAppGroups,
             note: note,
             onProgress: { p in
+                lastStreamFraction = min(0.94, max(0.12, 0.12 + p.fractionCompleted * 0.82))
                 let uploadedStr = ByteCountFormatter.string(fromByteCount: currentOffset, countStyle: .file)
                 let detail = currentOffset > 0
                     ? "\(p.statusDetail) • \(uploadedStr) uploaded (\(formatSpeed()))"
                     : p.statusDetail
                 progress(OperationProgress(
                     stage: shouldEncrypt ? "Encrypting & Streaming" : "Cloud Streaming",
-                    fractionCompleted: min(0.90, max(0.12, p.fractionCompleted * 0.85)),
+                    fractionCompleted: lastStreamFraction,
                     statusDetail: detail
                 ))
             }

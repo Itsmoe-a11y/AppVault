@@ -85,10 +85,27 @@ public struct BatchBackupSheet: View {
                 // Section 2: Destination & Mode (only editable before starting)
                 if !isExecuting && !isCompleted {
                     Section(header: Text("Destination")) {
-                        Picker("Destination", selection: $selectedDestination) {
-                            ForEach(BackupDestination.allCases) { dest in
-                                Label(dest.title, systemImage: dest.iconName).tag(dest)
+                        ForEach(BackupDestination.allCases) { dest in
+                            Button(action: {
+                                selectedDestination = dest
+                                UserDefaults.standard.set(dest.rawValue, forKey: "appvault_last_backup_destination")
+                            }) {
+                                HStack(spacing: 12) {
+                                    Image(systemName: dest.iconName)
+                                        .foregroundColor(selectedDestination == dest ? .blue : .secondary)
+                                        .frame(width: 24)
+                                    Text(dest.title)
+                                        .foregroundColor(.primary)
+                                        .font(.body.weight(selectedDestination == dest ? .semibold : .regular))
+                                    Spacer()
+                                    if selectedDestination == dest {
+                                        Image(systemName: "checkmark.circle.fill")
+                                            .foregroundColor(.blue)
+                                    }
+                                }
+                                .contentShape(Rectangle())
                             }
+                            .buttonStyle(PlainButtonStyle())
                         }
 
                         if selectedDestination == .googleDrive && !googleDrive.isAuthenticated {

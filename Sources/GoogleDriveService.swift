@@ -867,15 +867,17 @@ public final class GoogleDriveService: NSObject, ObservableObject, ASWebAuthenti
         totalFileSize: Int64?
     ) async throws -> (isComplete: Bool, fileID: String?) {
         var attempts = 0
-        let maxAttempts = 3
+        let maxAttempts = 5
         var currentToken = try await ensureValidToken()
+        let chunkEndNextOffset = startOffset + Int64(chunkData.count)
+        let chunkIndex = chunkData.isEmpty ? 0 : Int(startOffset / max(Int64(chunkData.count), 1))
 
         while attempts < maxAttempts {
             attempts += 1
 
             var request = URLRequest(url: sessionURL)
             request.httpMethod = "PUT"
-            request.timeoutInterval = 60
+            request.timeoutInterval = 120
             request.setValue("Bearer \(currentToken)", forHTTPHeaderField: "Authorization")
 
             let (data, response): (Data, URLResponse)
@@ -899,10 +901,19 @@ public final class GoogleDriveService: NSObject, ObservableObject, ASWebAuthenti
                     (data, response) = try await uploadSession.upload(for: request, from: chunkData)
                 }
             } catch {
+                DebugLogger.shared.log("GoogleDrive", "Network error on chunk offset=\(startOffset) (attempt \(attempts)/\(maxAttempts)): \(error.localizedDescription)", level: .warning)
                 if attempts >= maxAttempts || Task.isCancelled {
                     throw error
                 }
-                try await Task.sleep(nanoseconds: UInt64(attempts) * 1_000_000_000)
+                let backoffSec = UInt64(1 << min(attempts, 4))
+                try await Task.sleep(nanoseconds: backoffSec * 1_000_000_000)
+                if let status = try? await self.checkUploadStatus(sessionURL: sessionURL, totalFileSize: totalFileSize) {
+                    if status.isComplete { return (true, status.fileID) }
+                    if !chunkData.isEmpty && status.nextOffset >= chunkEndNextOffset {
+                        DebugLogger.shared.log("GoogleDrive", "Chunk offset=\(startOffset) was already committed on Google Drive (nextOffset=\(status.nextOffset)). Continuing stream.", level: .info)
+                        return (false, nil)
+                    }
+                }
                 continue
             }
 
@@ -910,7 +921,11 @@ public final class GoogleDriveService: NSObject, ObservableObject, ASWebAuthenti
                 throw NSError(domain: "GoogleDrive", code: 500, userInfo: [NSLocalizedDescriptionKey: "No response from Google Drive."])
             }
 
-            DebugLogger.shared.log("GoogleDrive", "uploadChunk offset=\(startOffset) bytes=\(chunkData.count) final=\(isFinal) -> HTTP \(http.statusCode)", level: (http.statusCode == 200 || http.statusCode == 201 || http.statusCode == 308) ? .info : .warning)
+            let isSuccessCode = (http.statusCode == 200 || http.statusCode == 201 || http.statusCode == 308)
+            if !isSuccessCode || isFinal || startOffset == 0 || (chunkIndex % 20 == 0) {
+                DebugLogger.shared.log("GoogleDrive", "uploadChunk offset=\(startOffset) bytes=\(chunkData.count) final=\(isFinal) -> HTTP \(http.statusCode)", level: isSuccessCode ? .info : .warning)
+            }
+
             if http.statusCode == 200 || http.statusCode == 201 {
                 if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                    let fileID = json["id"] as? String {
@@ -920,17 +935,21 @@ public final class GoogleDriveService: NSObject, ObservableObject, ASWebAuthenti
             } else if http.statusCode == 308 {
                 return (false, nil)
             } else if http.statusCode == 401 {
+                DebugLogger.shared.log("OAuth", "Received HTTP 401 during chunk upload — forcing token refresh...", level: .warning)
                 currentToken = try await self.ensureValidToken(forceRefresh: true)
                 continue
-            } else if http.statusCode >= 500 {
+            } else if http.statusCode == 429 || http.statusCode >= 500 {
                 if attempts >= maxAttempts {
                     let msg = String(data: data, encoding: .utf8) ?? "Server error \(http.statusCode)"
                     throw NSError(domain: "GoogleDrive", code: http.statusCode, userInfo: [NSLocalizedDescriptionKey: "Google Drive server error (HTTP \(http.statusCode)): \(msg)"])
                 }
-                try await Task.sleep(nanoseconds: UInt64(attempts) * 1_000_000_000)
-                let status = try? await self.checkUploadStatus(sessionURL: sessionURL, totalFileSize: totalFileSize)
-                if status?.isComplete == true {
-                    return (true, status?.fileID)
+                let backoffSec = UInt64(1 << min(attempts, 4))
+                try await Task.sleep(nanoseconds: backoffSec * 1_000_000_000)
+                if let status = try? await self.checkUploadStatus(sessionURL: sessionURL, totalFileSize: totalFileSize) {
+                    if status.isComplete { return (true, status.fileID) }
+                    if !chunkData.isEmpty && status.nextOffset >= chunkEndNextOffset {
+                        return (false, nil)
+                    }
                 }
                 continue
             } else {
