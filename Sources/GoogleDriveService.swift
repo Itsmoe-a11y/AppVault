@@ -95,6 +95,19 @@ private final class DownloadProgressDelegate: NSObject, URLSessionDownloadDelega
 }
 
 // MARK: - Google Drive Service (1-Tap PKCE Sign-In + Verified Token Refresh + Resumable Streaming)
+// MARK: - No-Redirect URLSession Delegate (Prevents iOS 16 URLSession from mistreating HTTP 308 Resume Incomplete as a redirect)
+private final class NoRedirectSessionDelegate: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
+    func urlSession(
+        _ session: URLSession,
+        task: URLSessionTask,
+        willPerformHTTPRedirection response: HTTPURLResponse,
+        newRequest request: URLRequest,
+        completionHandler: @escaping (URLRequest?) -> Void
+    ) {
+        completionHandler(nil)
+    }
+}
+
 @MainActor
 public final class GoogleDriveService: NSObject, ObservableObject, ASWebAuthenticationPresentationContextProviding {
     public static let shared = GoogleDriveService()
@@ -138,14 +151,34 @@ public final class GoogleDriveService: NSObject, ObservableObject, ASWebAuthenti
         return !trimmed.isEmpty && !trimmed.contains("__APPVAULT_GOOGLE_CLIENT_ID__") && trimmed.hasSuffix(".apps.googleusercontent.com")
     }
 
+    public var isUsingRcloneClientOverride: Bool {
+        let override = customClientId.trimmingCharacters(in: .whitespacesAndNewlines)
+        return override == RcloneHelper.rcloneDefaultClientId
+    }
+
+    /// Client ID used for API token refresh (respects rclone imported tokens when signed in via rclone).
     public var effectiveClientId: String {
         let override = customClientId.trimmingCharacters(in: .whitespacesAndNewlines)
         if !override.isEmpty { return override }
         return hasBundledDefaultClientId ? Self.bundledDefaultClientId : ""
     }
 
+    /// Client ID used for interactive iOS browser sign-in (never lets a stale rclone Desktop Client ID hijack AppVault OAuth).
+    public var interactiveSignInClientId: String {
+        let override = customClientId.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !override.isEmpty && override != RcloneHelper.rcloneDefaultClientId {
+            return override
+        }
+        return hasBundledDefaultClientId ? Self.bundledDefaultClientId : ""
+    }
+
     public var canStartOneTapSignIn: Bool {
-        !effectiveClientId.isEmpty
+        !interactiveSignInClientId.isEmpty
+    }
+
+    public func clearCustomOAuthOverride() {
+        customClientId = ""
+        customClientSecret = ""
     }
 
     // In-memory caching with Keychain backed persistent storage
@@ -207,13 +240,22 @@ public final class GoogleDriveService: NSObject, ObservableObject, ASWebAuthenti
         return URLSession(configuration: cfg)
     }()
 
-    /// Dedicated upload session with generous per-chunk timeouts for 5 MB resumable slices.
+    private let noRedirectDelegate = NoRedirectSessionDelegate()
+
+    // Google OAuth 2.0 Device Flow state (100% WebKit-free login for jailbroken iOS 16 devices)
+    @Published public var deviceUserCode: String? = nil
+    @Published public var deviceVerificationURL: String? = nil
+    @Published public var isPollingDeviceFlow: Bool = false
+    private var deviceFlowTask: Task<Void, Never>? = nil
+
+    /// Dedicated upload session with NoRedirectSessionDelegate so HTTP 308 Resume Incomplete
+    /// is always delivered directly to uploadChunk instead of triggering redirect handling on iOS 16.
     private lazy var uploadSession: URLSession = {
         let cfg = URLSessionConfiguration.default
         cfg.timeoutIntervalForRequest = 60
         cfg.timeoutIntervalForResource = 600
         cfg.waitsForConnectivity = false
-        return URLSession(configuration: cfg)
+        return URLSession(configuration: cfg, delegate: noRedirectDelegate, delegateQueue: nil)
     }()
 
     private override init() {
@@ -269,8 +311,10 @@ public final class GoogleDriveService: NSObject, ObservableObject, ASWebAuthenti
     }
 
     // MARK: - 1-Tap OAuth 2.0 PKCE Sign In (Google Email + Password + 2FA via Native Safari Sheet)
-    public func signIn() {
-        let clientId = effectiveClientId
+    public func signIn(ephemeral: Bool = false) {
+        if isUsingRcloneClientOverride { clearCustomOAuthOverride() }
+        let clientId = interactiveSignInClientId
+        DebugLogger.shared.log("OAuth", "Starting ASWebAuthenticationSession sign-in (ephemeral=\(ephemeral), clientPrefix=\(clientId.prefix(12))...)")
         guard !clientId.isEmpty else {
             errorMessage = "Google OAuth Client ID is not configured yet. Set a default iOS Client ID in this build or enter one under Advanced OAuth Settings."
             return
@@ -329,6 +373,7 @@ public final class GoogleDriveService: NSObject, ObservableObject, ASWebAuthenti
                     if nsError.domain == ASWebAuthenticationSessionErrorDomain && nsError.code == ASWebAuthenticationSessionError.canceledLogin.rawValue {
                         return
                     }
+                    DebugLogger.shared.log("OAuth", "ASWebAuthenticationSession failed: \(error.localizedDescription)", level: .error)
                     self.errorMessage = error.localizedDescription
                     return
                 }
@@ -357,7 +402,7 @@ public final class GoogleDriveService: NSObject, ObservableObject, ASWebAuthenti
         }
 
         authSession?.presentationContextProvider = self
-        authSession?.prefersEphemeralWebBrowserSession = false
+        authSession?.prefersEphemeralWebBrowserSession = ephemeral
         authSession?.start()
     }
 
@@ -372,6 +417,7 @@ public final class GoogleDriveService: NSObject, ObservableObject, ASWebAuthenti
         isAuthenticating = true
         errorMessage = nil
 
+        DebugLogger.shared.log("OAuth", "Opening external browser for Google OAuth (scheme=\(built.callbackScheme))")
         UIApplication.shared.open(built.authURL, options: [:]) { [weak self] success in
             if !success {
                 Task { @MainActor in
@@ -384,6 +430,7 @@ public final class GoogleDriveService: NSObject, ObservableObject, ASWebAuthenti
 
     /// Handles the OAuth callback URL returned from External Safari / Chrome into AppVaultApp.onOpenURL.
     public func handleIncomingOAuthURL(_ url: URL) {
+        DebugLogger.shared.log("OAuth", "Received callback URL scheme=\(url.scheme ?? "nil") host=\(url.host ?? "nil")")
         guard let queryItems = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems else {
             return
         }
@@ -419,7 +466,8 @@ public final class GoogleDriveService: NSObject, ObservableObject, ASWebAuthenti
     }
 
     private func buildOAuthRequest() -> (authURL: URL, verifier: String, state: String, redirectURI: String, clientId: String, callbackScheme: String)? {
-        let clientId = effectiveClientId
+        if isUsingRcloneClientOverride { clearCustomOAuthOverride() }
+        let clientId = interactiveSignInClientId
         guard !clientId.isEmpty else {
             errorMessage = "Google OAuth Client ID is not configured yet. Bake in your iOS Client ID or enter one under Advanced OAuth Settings."
             return nil
@@ -577,6 +625,7 @@ public final class GoogleDriveService: NSObject, ObservableObject, ASWebAuthenti
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let newAccess = json["access_token"] as? String else {
             let errorText = String(data: data, encoding: .utf8) ?? "Authentication refresh failed"
+            DebugLogger.shared.log("OAuth", "Token refresh failed HTTP \((response as? HTTPURLResponse)?.statusCode ?? -1): \(errorText)", level: .error)
             throw NSError(domain: "GoogleDrive", code: 401, userInfo: [NSLocalizedDescriptionKey: "Failed to refresh Google token: \(errorText)"])
         }
 
@@ -616,6 +665,9 @@ public final class GoogleDriveService: NSObject, ObservableObject, ASWebAuthenti
         userEmail = ""
         userName = ""
         isAuthenticated = false
+        if isUsingRcloneClientOverride {
+            clearCustomOAuthOverride()
+        }
         UserDefaults.standard.removeObject(forKey: "gdrive_user_email")
         UserDefaults.standard.removeObject(forKey: "gdrive_user_name")
     }
@@ -723,6 +775,7 @@ public final class GoogleDriveService: NSObject, ObservableObject, ASWebAuthenti
         mimeType: String = "application/x-gzip",
         onStatus: ((String) -> Void)? = nil
     ) async throws -> URL {
+        DebugLogger.shared.log("GoogleDrive", "Initiating resumable upload for \(fileName) (mime=\(mimeType))")
         onStatus?("Validating Google Drive access token...")
         let token = try await ensureValidToken()
 
@@ -755,9 +808,11 @@ public final class GoogleDriveService: NSObject, ObservableObject, ASWebAuthenti
               let locationString = http.value(forHTTPHeaderField: "Location"),
               let sessionURL = URL(string: locationString) else {
             let errBody = String(data: data, encoding: .utf8) ?? "No error details"
+            DebugLogger.shared.log("GoogleDrive", "initiateResumableUpload failed HTTP \(http.statusCode): \(errBody)", level: .error)
             throw NSError(domain: "GoogleDrive", code: http.statusCode, userInfo: [NSLocalizedDescriptionKey: "Google Drive upload session failed (HTTP \(http.statusCode)): \(errBody)"])
         }
 
+        DebugLogger.shared.log("GoogleDrive", "Resumable upload session opened successfully.", level: .success)
         return sessionURL
     }
 
@@ -808,60 +863,69 @@ public final class GoogleDriveService: NSObject, ObservableObject, ASWebAuthenti
 
             var request = URLRequest(url: sessionURL)
             request.httpMethod = "PUT"
+            request.timeoutInterval = 60
             request.setValue("Bearer \(currentToken)", forHTTPHeaderField: "Authorization")
-            request.httpBody = chunkData
 
-            if chunkData.isEmpty {
-                let totalStr = totalFileSize.map { "\($0)" } ?? "\(startOffset)"
-                request.setValue("bytes */\(totalStr)", forHTTPHeaderField: "Content-Range")
-                request.setValue("0", forHTTPHeaderField: "Content-Length")
-            } else {
-                let endOffset = startOffset + Int64(chunkData.count) - 1
-                let totalStr: String
-                if let total = totalFileSize {
-                    totalStr = "\(total)"
-                } else if isFinal {
-                    totalStr = "\(endOffset + 1)"
-                } else {
-                    totalStr = "*"
-                }
-                request.setValue("bytes \(startOffset)-\(endOffset)/\(totalStr)", forHTTPHeaderField: "Content-Range")
-                request.setValue("\(chunkData.count)", forHTTPHeaderField: "Content-Length")
-            }
-
+            let (data, response): (Data, URLResponse)
             do {
-                let (data, response) = try await uploadSession.data(for: request)
-                guard let http = response as? HTTPURLResponse else {
-                    throw NSError(domain: "GoogleDrive", code: 500, userInfo: [NSLocalizedDescriptionKey: "No response from Google Drive."])
-                }
-
-                if http.statusCode == 200 || http.statusCode == 201 {
-                    if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                       let fileID = json["id"] as? String {
-                        return (true, fileID)
-                    }
-                    return (true, nil)
-                } else if http.statusCode == 308 {
-                    return (false, nil)
-                } else if http.statusCode == 401 {
-                    currentToken = try await self.ensureValidToken(forceRefresh: true)
-                    continue
-                } else if http.statusCode >= 500 {
-                    try await Task.sleep(nanoseconds: UInt64(attempts) * 1_000_000_000)
-                    let status = try? await self.checkUploadStatus(sessionURL: sessionURL, totalFileSize: totalFileSize)
-                    if status?.isComplete == true {
-                        return (true, status?.fileID)
-                    }
-                    continue
+                if chunkData.isEmpty {
+                    let totalStr = totalFileSize.map { "\($0)" } ?? "\(startOffset)"
+                    request.setValue("bytes */\(totalStr)", forHTTPHeaderField: "Content-Range")
+                    (data, response) = try await uploadSession.data(for: request)
                 } else {
-                    let msg = String(data: data, encoding: .utf8) ?? "Upload chunk error \(http.statusCode)"
-                    throw NSError(domain: "GoogleDrive", code: http.statusCode, userInfo: [NSLocalizedDescriptionKey: msg])
+                    let endOffset = startOffset + Int64(chunkData.count) - 1
+                    let totalStr: String
+                    if let total = totalFileSize {
+                        totalStr = "\(total)"
+                    } else if isFinal {
+                        totalStr = "\(endOffset + 1)"
+                    } else {
+                        totalStr = "*"
+                    }
+                    request.setValue("bytes \(startOffset)-\(endOffset)/\(totalStr)", forHTTPHeaderField: "Content-Range")
+                    request.setValue("application/octet-stream", forHTTPHeaderField: "Content-Type")
+                    (data, response) = try await uploadSession.upload(for: request, from: chunkData)
                 }
             } catch {
-                if attempts >= maxAttempts {
+                if attempts >= maxAttempts || Task.isCancelled {
                     throw error
                 }
                 try await Task.sleep(nanoseconds: UInt64(attempts) * 1_000_000_000)
+                continue
+            }
+
+            guard let http = response as? HTTPURLResponse else {
+                throw NSError(domain: "GoogleDrive", code: 500, userInfo: [NSLocalizedDescriptionKey: "No response from Google Drive."])
+            }
+
+            DebugLogger.shared.log("GoogleDrive", "uploadChunk offset=\(startOffset) bytes=\(chunkData.count) final=\(isFinal) -> HTTP \(http.statusCode)", level: (http.statusCode == 200 || http.statusCode == 201 || http.statusCode == 308) ? .info : .warning)
+            if http.statusCode == 200 || http.statusCode == 201 {
+                if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                   let fileID = json["id"] as? String {
+                    return (true, fileID)
+                }
+                return (true, nil)
+            } else if http.statusCode == 308 {
+                return (false, nil)
+            } else if http.statusCode == 401 {
+                currentToken = try await self.ensureValidToken(forceRefresh: true)
+                continue
+            } else if http.statusCode >= 500 {
+                if attempts >= maxAttempts {
+                    let msg = String(data: data, encoding: .utf8) ?? "Server error \(http.statusCode)"
+                    throw NSError(domain: "GoogleDrive", code: http.statusCode, userInfo: [NSLocalizedDescriptionKey: "Google Drive server error (HTTP \(http.statusCode)): \(msg)"])
+                }
+                try await Task.sleep(nanoseconds: UInt64(attempts) * 1_000_000_000)
+                let status = try? await self.checkUploadStatus(sessionURL: sessionURL, totalFileSize: totalFileSize)
+                if status?.isComplete == true {
+                    return (true, status?.fileID)
+                }
+                continue
+            } else {
+                // Non-retryable 4xx client error: fail immediately with full Google JSON reason
+                let msg = String(data: data, encoding: .utf8) ?? "Upload chunk error \(http.statusCode)"
+                DebugLogger.shared.log("GoogleDrive", "Chunk rejected HTTP \(http.statusCode): \(msg)", level: .error)
+                throw NSError(domain: "GoogleDrive", code: http.statusCode, userInfo: [NSLocalizedDescriptionKey: "Google Drive rejected upload chunk (HTTP \(http.statusCode)): \(msg)"])
             }
         }
 
@@ -986,5 +1050,139 @@ public final class GoogleDriveService: NSObject, ObservableObject, ASWebAuthenti
             .replacingOccurrences(of: "+", with: "-")
             .replacingOccurrences(of: "/", with: "_")
             .replacingOccurrences(of: "=", with: "")
+    }
+
+    // MARK: - 2-Second Upload Diagnostic Test
+    public func testDriveConnection() async throws -> String {
+        let testName = "AppVault_ConnectionTest_\(Int(Date().timeIntervalSince1970)).tmp"
+        let sessionURL = try await initiateResumableUpload(fileName: testName, mimeType: "text/plain")
+        let payload = Data("AppVault-OK".utf8)
+        let (_, fileID) = try await uploadChunk(
+            sessionURL: sessionURL,
+            chunkData: payload,
+            startOffset: 0,
+            isFinal: true,
+            totalFileSize: Int64(payload.count)
+        )
+        if let id = fileID {
+            try? await deleteCloudBackup(fileID: id)
+        }
+        return "Google Drive token, folder '\(targetFolderName)', and resumable upload are working!"
+    }
+
+    // MARK: - WebKit-Free OAuth 2.0 Device Flow (Works 100% on Jailbroken iOS 16 via Any PC/Phone Browser)
+    public func startDeviceFlow(deviceClientId: String, deviceClientSecret: String) {
+        let cid = deviceClientId.trimmingCharacters(in: .whitespacesAndNewlines)
+        let csec = deviceClientSecret.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cid.isEmpty, !csec.isEmpty else {
+            errorMessage = "Device Flow requires a Google 'TVs and Limited Input devices' Client ID and Client Secret."
+            return
+        }
+
+        cancelDeviceFlow()
+        errorMessage = nil
+        isAuthenticating = true
+        isPollingDeviceFlow = true
+
+        deviceFlowTask = Task {
+            do {
+                guard let url = URL(string: "https://oauth2.googleapis.com/device/code") else { return }
+                var req = URLRequest(url: url)
+                req.httpMethod = "POST"
+                req.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
+
+                var allowed = CharacterSet.alphanumerics
+                allowed.insert(charactersIn: "-._~")
+                let scope = "https://www.googleapis.com/auth/drive.file"
+                let params = ["client_id": cid, "scope": scope]
+                req.httpBody = params.compactMap { k, v in
+                    guard let ek = k.addingPercentEncoding(withAllowedCharacters: allowed),
+                          let ev = v.addingPercentEncoding(withAllowedCharacters: allowed) else { return nil }
+                    return "\(ek)=\(ev)"
+                }.joined(separator: "&").data(using: .utf8)
+
+                let (data, res) = try await apiSession.data(for: req)
+                guard let http = res as? HTTPURLResponse, http.statusCode == 200,
+                      let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                      let deviceCode = json["device_code"] as? String,
+                      let userCode = json["user_code"] as? String,
+                      let verifyURL = json["verification_url"] as? String else {
+                    let err = String(data: data, encoding: .utf8) ?? "Device flow initiation failed"
+                    self.errorMessage = "Device login error: \(err)"
+                    self.cancelDeviceFlow()
+                    return
+                }
+
+                self.deviceUserCode = userCode
+                self.deviceVerificationURL = verifyURL
+                let interval = max(5, (json["interval"] as? Int) ?? 5)
+                let expiresIn = (json["expires_in"] as? Int) ?? 600
+                let deadline = Date().addingTimeInterval(TimeInterval(expiresIn))
+
+                while !Task.isCancelled && Date() < deadline {
+                    try await Task.sleep(nanoseconds: UInt64(interval) * 1_000_000_000)
+                    guard let tokenURL = URL(string: "https://oauth2.googleapis.com/token") else { break }
+                    var pollReq = URLRequest(url: tokenURL)
+                    pollReq.httpMethod = "POST"
+                    pollReq.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
+
+                    let pollParams = [
+                        "client_id": cid,
+                        "client_secret": csec,
+                        "device_code": deviceCode,
+                        "grant_type": "urn:ietf:params:oauth:grant-type:device_code"
+                    ]
+                    pollReq.httpBody = pollParams.compactMap { k, v in
+                        guard let ek = k.addingPercentEncoding(withAllowedCharacters: allowed),
+                              let ev = v.addingPercentEncoding(withAllowedCharacters: allowed) else { return nil }
+                        return "\(ek)=\(ev)"
+                    }.joined(separator: "&").data(using: .utf8)
+
+                    let (pData, pRes) = try await apiSession.data(for: pollReq)
+                    if let pHttp = pRes as? HTTPURLResponse, pHttp.statusCode == 200,
+                       let pJson = try? JSONSerialization.jsonObject(with: pData) as? [String: Any],
+                       let access = pJson["access_token"] as? String {
+                        self.customClientId = cid
+                        self.customClientSecret = csec
+                        self.accessToken = access
+                        if let refresh = pJson["refresh_token"] as? String, !refresh.isEmpty {
+                            self.refreshToken = refresh
+                        }
+                        let exp = (pJson["expires_in"] as? Double) ?? 3500
+                        self.tokenExpiry = Date().addingTimeInterval(exp)
+                        self.isAuthenticated = true
+                        self.userName = "Google Drive (Device Login)"
+                        self.cancelDeviceFlow()
+                        await self.fetchUserProfile()
+                        return
+                    } else if let pJson = try? JSONSerialization.jsonObject(with: pData) as? [String: Any],
+                              let errCode = pJson["error"] as? String {
+                        if errCode == "authorization_pending" || errCode == "slow_down" {
+                            continue
+                        }
+                        self.errorMessage = "Device login stopped: \(errCode)"
+                        self.cancelDeviceFlow()
+                        return
+                    }
+                }
+
+                self.errorMessage = "Device login code expired. Tap to generate a new code."
+                self.cancelDeviceFlow()
+            } catch {
+                if !Task.isCancelled {
+                    self.errorMessage = error.localizedDescription
+                }
+                self.cancelDeviceFlow()
+            }
+        }
+    }
+
+    public func cancelDeviceFlow() {
+        deviceFlowTask?.cancel()
+        deviceFlowTask = nil
+        deviceUserCode = nil
+        deviceVerificationURL = nil
+        isPollingDeviceFlow = false
+        isAuthenticating = false
     }
 }

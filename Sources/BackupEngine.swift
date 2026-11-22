@@ -170,6 +170,7 @@ public final class BackupEngine {
         let shouldEncrypt = (password != nil && !(password!.isEmpty))
         let archiveName = makeArchiveName(for: app, isEncrypted: shouldEncrypt)
 
+        DebugLogger.shared.log("Backup", "Starting Google Drive stream for \(app.name) (\(app.bundleIdentifier), mode=\(mode.rawValue), encrypted=\(shouldEncrypt))")
         progress(OperationProgress(
             stage: "Connecting to Google Drive",
             fractionCompleted: 0.03,
@@ -292,6 +293,7 @@ public final class BackupEngine {
         record.isEncrypted = shouldEncrypt
 
         let folderLabel = await MainActor.run { GoogleDriveService.shared.targetFolderName }
+        DebugLogger.shared.log("Backup", "Google Drive upload completed: \(archiveName) (\(record.formattedSize))", level: .success)
         progress(OperationProgress(
             stage: "Upload Complete",
             fractionCompleted: 1.0,

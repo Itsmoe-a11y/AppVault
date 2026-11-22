@@ -89,22 +89,23 @@ jobs:
           tag_name: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || github.event.inputs.release_tag || 'v2.2.0' }}
           name: "AppVault ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || github.event.inputs.release_tag || 'v2.2.0' }}"
           body: |
-            ## AppVault v2.2.0 - External Browser OAuth, Zero-Disk Encryption & iOS 16 Hardening
+            ## AppVault v2.2.0 - Diagnostics Logger, HTTP 308 Resumable Fix & Cloud Sync Suite
 
             AppVault is an unsandboxed application for **TrollStore** and **jailbroken** iOS devices (iOS 15.0 - 17.0+).
 
             ### Highlights & Features in v2.2.0:
-            1. 🌐 **External Browser Google Sign-In & Callback Handler**:
-               - Dedicated Safari / External Browser PKCE authentication fallback resolving iOS 16 WebKit sheet restrictions.
-               - Deep link handler (`onOpenURL`) capturing OAuth authorization codes and auto-completing sign-in.
-            2. 🔐 **Zero-Disk Streaming AES-256-GCM Encryptor (`AVENC02`)**:
+            1. 📋 **In-App Real-Time Debug Logger & Diagnostics**:
+               - Embedded live log console with color-coded severity levels, category filters, and 1-tap clipboard export.
+            2. 🔄 **Resumable Upload No-Redirect Engine**:
+               - Dedicated `NoRedirectSessionDelegate` preventing iOS 16 URLSession from treating Google Drive HTTP 308 Resume Incomplete headers as standard redirects.
+            3. 🧪 **Cloud Connection & Upload Self-Test**:
+               - Direct "Test Google Drive Upload" button verifying OAuth token scopes, folder resolution, and write permissions in real time.
+            4. 🌐 **Multi-Mode Google Sign-In Suite**:
+               - Ephemeral Safari Sheet, External Browser callback (`onOpenURL`), and WebKit-free TV/Device Code Flow.
+            5. 🔐 **Zero-Disk Streaming AES-256-GCM Encryptor (`AVENC02`)**:
                - Encrypts streaming backup chunks purely in RAM on-the-fly directly to Google Drive (0 MB local disk usage).
-            3. 📲 **TrollStore iOS 16 Export Coordinator**:
+            6. 📲 **TrollStore iOS 16 Export Coordinator & Filza**:
                - Staged APFS hardlinks with safe POSIX permissions preventing white-screen/XPC crashes when sharing backups.
-            4. 📁 **Filza Integration & Persistent Directory**:
-               - 1-tap "Reveal in Filza" with clipboard path copy, stored in `/var/mobile/Documents/AppVaultBackups`.
-            5. 🛡️ **Interactive Cancel & Sleep Prevention**:
-               - Added cancel buttons for active backup/stream tasks and automatic idle timer management.
 
             ### Installation:
             - **TrollStore**: Download `AppVault.tipa` (or `AppVault.ipa`) and open in TrollStore.

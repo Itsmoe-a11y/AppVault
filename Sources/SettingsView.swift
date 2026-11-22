@@ -25,6 +25,12 @@ public struct SettingsView: View {
     @State private var isTestingWebDAV = false
     @State private var webdavTestStatus: String? = nil
     @State private var webdavTestSuccess = false
+    @State private var isTestingGDrive = false
+    @State private var gdriveTestStatus: String? = nil
+    @State private var gdriveTestSuccess = false
+    @State private var showDeviceFlowSection = false
+    @State private var deviceFlowClientId = ""
+    @State private var deviceFlowClientSecret = ""
 
     public init() {}
 
@@ -125,7 +131,51 @@ public struct SettingsView: View {
                         }
                         .padding(.vertical, 4)
 
-                        Button(action: { googleDrive.signOut() }) {
+                        Button(action: {
+                            isTestingGDrive = true
+                            gdriveTestStatus = nil
+                            Task {
+                                do {
+                                    let msg = try await googleDrive.testDriveConnection()
+                                    await MainActor.run {
+                                        isTestingGDrive = false
+                                        gdriveTestSuccess = true
+                                        gdriveTestStatus = msg
+                                    }
+                                } catch {
+                                    await MainActor.run {
+                                        isTestingGDrive = false
+                                        gdriveTestSuccess = false
+                                        gdriveTestStatus = error.localizedDescription
+                                    }
+                                }
+                            }
+                        }) {
+                            HStack {
+                                if isTestingGDrive {
+                                    ProgressView().scaleEffect(0.8)
+                                    Text("Testing Google Drive Upload...")
+                                } else {
+                                    Label("Test Google Drive Upload", systemImage: "checkmark.icloud")
+                                }
+                            }
+                        }
+                        .disabled(isTestingGDrive)
+
+                        if let status = gdriveTestStatus {
+                            HStack(alignment: .top, spacing: 6) {
+                                Image(systemName: gdriveTestSuccess ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
+                                    .foregroundColor(gdriveTestSuccess ? .green : .red)
+                                Text(status)
+                                    .font(.caption)
+                                    .foregroundColor(gdriveTestSuccess ? .green : .red)
+                            }
+                        }
+
+                        Button(action: {
+                            gdriveTestStatus = nil
+                            googleDrive.signOut()
+                        }) {
                             Text("Disconnect Google Drive")
                                 .foregroundColor(.red)
                         }
@@ -196,21 +246,130 @@ public struct SettingsView: View {
                             .padding(.vertical, 2)
 
                             if googleDrive.canStartOneTapSignIn {
-                                Button(action: {
-                                    googleDrive.signInWithExternalBrowser()
-                                }) {
-                                    HStack {
-                                        Image(systemName: "safari")
-                                        Text("Sign In via External Browser (iOS 16 Fix)")
+                                HStack(spacing: 8) {
+                                    Button(action: {
+                                        googleDrive.signIn(ephemeral: true)
+                                    }) {
+                                        HStack(spacing: 4) {
+                                            Image(systemName: "hand.raised.fill")
+                                            Text("Private Sheet")
+                                        }
+                                        .font(.caption.weight(.semibold))
+                                        .foregroundColor(.blue)
+                                        .frame(maxWidth: .infinity)
+                                        .padding(.vertical, 8)
+                                        .background(Color.blue.opacity(0.1))
+                                        .cornerRadius(8)
                                     }
-                                    .font(.caption.weight(.semibold))
-                                    .foregroundColor(.blue)
-                                    .frame(maxWidth: .infinity)
-                                    .padding(.vertical, 8)
-                                    .background(Color.blue.opacity(0.1))
-                                    .cornerRadius(8)
+                                    .buttonStyle(BorderlessButtonStyle())
+
+                                    Button(action: {
+                                        googleDrive.signInWithExternalBrowser()
+                                    }) {
+                                        HStack(spacing: 4) {
+                                            Image(systemName: "safari")
+                                            Text("External Browser")
+                                        }
+                                        .font(.caption.weight(.semibold))
+                                        .foregroundColor(.blue)
+                                        .frame(maxWidth: .infinity)
+                                        .padding(.vertical, 8)
+                                        .background(Color.blue.opacity(0.1))
+                                        .cornerRadius(8)
+                                    }
+                                    .buttonStyle(BorderlessButtonStyle())
                                 }
-                                .buttonStyle(BorderlessButtonStyle())
+                            }
+
+                            DisclosureGroup("Jailbreak / Zero-WebKit Login (google.com/device)", isExpanded: $showDeviceFlowSection) {
+                                VStack(alignment: .leading, spacing: 8) {
+                                    Text("If Google shows 'Something went wrong' on a jailbroken iOS 16 device, sign in on any PC or other phone using a Google 'TV & Limited Input' OAuth Client ID (no iOS WebKit used).")
+                                        .font(.caption2)
+                                        .foregroundColor(.secondary)
+
+                                    if let code = googleDrive.deviceUserCode, let urlStr = googleDrive.deviceVerificationURL {
+                                        VStack(alignment: .leading, spacing: 6) {
+                                            Text("1. Open \(urlStr) on any PC/phone browser")
+                                                .font(.caption)
+                                            HStack {
+                                                Text(code)
+                                                    .font(.system(size: 20, weight: .bold, design: .monospaced))
+                                                    .foregroundColor(.blue)
+                                                Spacer()
+                                                Button("Copy Code") {
+                                                    UIPasteboard.general.string = code
+                                                }
+                                                .buttonStyle(BorderlessButtonStyle())
+                                                .font(.caption)
+                                            }
+                                            HStack {
+                                                ProgressView().scaleEffect(0.8)
+                                                Text("Waiting for approval...")
+                                                    .font(.caption2)
+                                                    .foregroundColor(.secondary)
+                                                Spacer()
+                                                Button("Cancel") {
+                                                    googleDrive.cancelDeviceFlow()
+                                                }
+                                                .buttonStyle(BorderlessButtonStyle())
+                                                .font(.caption)
+                                                .foregroundColor(.red)
+                                            }
+                                        }
+                                        .padding(8)
+                                        .background(Color(UIColor.secondarySystemBackground))
+                                        .cornerRadius(8)
+                                    } else {
+                                        TextField("TV/Device Client ID", text: $deviceFlowClientId)
+                                            .font(.system(size: 12, design: .monospaced))
+                                            .autocapitalization(.none)
+                                            .disableAutocorrection(true)
+                                            .padding(6)
+                                            .background(Color(UIColor.secondarySystemBackground))
+                                            .cornerRadius(6)
+
+                                        SecureField("TV/Device Client Secret", text: $deviceFlowClientSecret)
+                                            .font(.system(size: 12, design: .monospaced))
+                                            .autocapitalization(.none)
+                                            .disableAutocorrection(true)
+                                            .padding(6)
+                                            .background(Color(UIColor.secondarySystemBackground))
+                                            .cornerRadius(6)
+
+                                        Button("Generate Device Sign-In Code") {
+                                            googleDrive.startDeviceFlow(
+                                                deviceClientId: deviceFlowClientId,
+                                                deviceClientSecret: deviceFlowClientSecret
+                                            )
+                                        }
+                                        .buttonStyle(BorderlessButtonStyle())
+                                        .font(.caption.weight(.semibold))
+                                        .foregroundColor(.white)
+                                        .frame(maxWidth: .infinity)
+                                        .padding(.vertical, 8)
+                                        .background(deviceFlowClientId.isEmpty || deviceFlowClientSecret.isEmpty ? Color.gray : Color.blue)
+                                        .cornerRadius(8)
+                                        .disabled(deviceFlowClientId.isEmpty || deviceFlowClientSecret.isEmpty)
+                                    }
+                                }
+                                .padding(.vertical, 4)
+                            }
+
+                            if !googleDrive.customClientId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                                HStack {
+                                    Text(googleDrive.isUsingRcloneClientOverride
+                                         ? "Saved rclone Client ID override detected."
+                                         : "Using Custom Client ID override.")
+                                        .font(.caption2)
+                                        .foregroundColor(.orange)
+                                    Spacer()
+                                    Button("Reset") {
+                                        googleDrive.clearCustomOAuthOverride()
+                                    }
+                                    .buttonStyle(BorderlessButtonStyle())
+                                    .font(.caption2)
+                                    .foregroundColor(.blue)
+                                }
                             }
 
                             if googleDrive.hasBundledDefaultClientId && googleDrive.customClientId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
@@ -357,8 +516,7 @@ public struct SettingsView: View {
                                             _ = rclone.importGoogleDriveTokens(from: remote)
                                         }) {
                                             Text("Connect Google Drive")
-                                                .font(.caption)
-                                                .fontWeight(.semibold)
+                                                .font(.caption.weight(.semibold))
                                                 .foregroundColor(.white)
                                                 .padding(.horizontal, 10)
                                                 .padding(.vertical, 6)
@@ -608,6 +766,26 @@ public struct SettingsView: View {
                             .foregroundColor(.primary)
                     }
                     .padding(.vertical, 4)
+                }
+
+                // Section 8.5: Debug & Diagnostic Logs
+                Section(header: Text("Diagnostics & Debug Logs")) {
+                    NavigationLink(destination: DebugLogsView()) {
+                        HStack {
+                            Label("View Live Debug Logs", systemImage: "terminal.fill")
+                            Spacer()
+                            Text("\(DebugLogger.shared.entries.count)")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                        }
+                    }
+
+                    Button(action: {
+                        UIPasteboard.general.string = DebugLogger.shared.exportTextReport()
+                    }) {
+                        Label("Copy Sanitized Diagnostic Report", systemImage: "doc.on.doc")
+                            .font(.subheadline)
+                    }
                 }
 
                 // Section 9: About
@@ -918,7 +1096,7 @@ public struct RcloneConfSheet: View {
                         HStack {
                             Spacer()
                             Text("Parse & Save Remotes")
-                                .fontWeight(.semibold)
+                                .font(.body.weight(.semibold))
                             Spacer()
                         }
                     }

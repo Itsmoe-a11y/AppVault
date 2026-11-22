@@ -73,8 +73,12 @@ public final class ExportPresenterCoordinator: NSObject, UIDocumentPickerDelegat
     }
 
     public func presentShareSheet(url: URL) {
-        guard FileManager.default.fileExists(atPath: url.path) else { return }
+        guard FileManager.default.fileExists(atPath: url.path) else {
+            DebugLogger.shared.log("Export", "Export aborted: file missing at \(url.path)", level: .error)
+            return
+        }
         let staged = stageExportURL(for: url)
+        DebugLogger.shared.log("Export", "Staged \(url.lastPathComponent) -> \(staged.path)")
         activeStagedURL = (staged.path != url.path) ? staged : nil
 
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
@@ -98,8 +102,12 @@ public final class ExportPresenterCoordinator: NSObject, UIDocumentPickerDelegat
     }
 
     public func presentExportPicker(url: URL) {
-        guard FileManager.default.fileExists(atPath: url.path) else { return }
+        guard FileManager.default.fileExists(atPath: url.path) else {
+            DebugLogger.shared.log("Export", "Export aborted: file missing at \(url.path)", level: .error)
+            return
+        }
         let staged = stageExportURL(for: url)
+        DebugLogger.shared.log("Export", "Staged \(url.lastPathComponent) -> \(staged.path)")
         activeStagedURL = (staged.path != url.path) ? staged : nil
 
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
@@ -121,8 +129,12 @@ public final class ExportPresenterCoordinator: NSObject, UIDocumentPickerDelegat
     /// Fallback native iOS Open-In sheet (UIDocumentInteractionController) — works reliably on iOS 16.0 TrollStore
     /// even when DocumentManager's Files XPC extension refuses an unsandboxed app.
     public func presentOpenInMenu(url: URL) {
-        guard FileManager.default.fileExists(atPath: url.path) else { return }
+        guard FileManager.default.fileExists(atPath: url.path) else {
+            DebugLogger.shared.log("Export", "Export aborted: file missing at \(url.path)", level: .error)
+            return
+        }
         let staged = stageExportURL(for: url)
+        DebugLogger.shared.log("Export", "Staged \(url.lastPathComponent) -> \(staged.path)")
         activeStagedURL = (staged.path != url.path) ? staged : nil
 
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {

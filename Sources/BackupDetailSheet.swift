@@ -464,6 +464,7 @@ public struct BackupDetailSheet: View {
             } catch {
                 await MainActor.run {
                     self.isExecuting = false
+                    DebugLogger.shared.log("Backup", "Backup failed for \(self.currentApp.name): \(error.localizedDescription)", level: .error)
                     self.executionError = error.localizedDescription
                 }
             }
