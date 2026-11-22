@@ -73,7 +73,15 @@ public final class AppsViewModel: ObservableObject {
         }
     }
 
+    private final class ScanCancelToken: @unchecked Sendable {
+        private let lock = NSLock()
+        private var cancelled = false
+        func cancel() { lock.lock(); cancelled = true; lock.unlock() }
+        var isCancelled: Bool { lock.lock(); defer { lock.unlock() }; return cancelled }
+    }
+
     private var scanTask: Task<Void, Never>? = nil
+    private var scanCancelToken: ScanCancelToken? = nil
 
     public init() {
         refreshApps()
@@ -120,7 +128,10 @@ public final class AppsViewModel: ObservableObject {
     }
 
     public func refreshApps() {
+        scanCancelToken?.cancel()
         scanTask?.cancel()
+        let cancelToken = ScanCancelToken()
+        scanCancelToken = cancelToken
         isScanning = true
 
         scanTask = Task.detached(priority: .userInitiated) {
@@ -156,28 +167,35 @@ public final class AppsViewModel: ObservableObject {
                 return
             }
 
-            // Offload synchronous POSIX directory sizing onto a dedicated utility GCD queue
-            // so we NEVER starve Swift's cooperative thread pool (which previously froze streaming backups on "Initializing")
-            let sizingQueue = DispatchQueue(label: "dev.moe.appvault.sizing", qos: .utility, attributes: .concurrent)
-            let maxWorkers = 2
+            // Offload pure POSIX directory sizing onto a dedicated concurrent GCD queue (.default QoS)
+            // with 6 workers: eliminates head-of-line stalling behind large apps while keeping
+            // Swift's cooperative thread pool 100% free for .userInitiated Google Drive backups!
+            let sizingQueue = DispatchQueue(label: "dev.moe.appvault.sizing", qos: .default, attributes: .concurrent)
+            let maxWorkers = 6
             var nextToSubmit = 0
 
-            func sizeOnUtilityQueue(_ targetApp: InstalledApp) async -> (Int64, Int64, Int64) {
+            func sizeOnDedicatedQueue(_ targetApp: InstalledApp) async -> (Int64, Int64, Int64) {
                 await withCheckedContinuation { continuation in
                     sizingQueue.async {
-                        let sizes = AppDiscoveryService.shared.calculateAppSizes(for: targetApp)
+                        if cancelToken.isCancelled {
+                            continuation.resume(returning: (0, 0, 0))
+                            return
+                        }
+                        let sizes = AppDiscoveryService.shared.calculateAppSizes(
+                            for: targetApp,
+                            shouldCancel: { cancelToken.isCancelled }
+                        )
                         continuation.resume(returning: (sizes.appSize, sizes.dataSize, sizes.groupSize))
                     }
                 }
             }
 
             await withTaskGroup(of: (Int, Int64, Int64, Int64).self) { group in
-                // Initial worker window
                 while nextToSubmit < orderedIndices.count && nextToSubmit < maxWorkers {
                     let idx = orderedIndices[nextToSubmit]
                     let app = currentApps[idx]
                     group.addTask {
-                        let sizes = await sizeOnUtilityQueue(app)
+                        let sizes = await sizeOnDedicatedQueue(app)
                         return (idx, sizes.0, sizes.1, sizes.2)
                     }
                     nextToSubmit += 1
@@ -186,9 +204,8 @@ public final class AppsViewModel: ObservableObject {
                 var lastUIUpdateTime = Date()
                 var completedBatchCount = 0
 
-                // As soon as ANY single worker finishes: update that app and submit the next unsized app!
                 for await (idx, appSize, dataSize, groupSize) in group {
-                    guard !Task.isCancelled else { break }
+                    guard !Task.isCancelled && !cancelToken.isCancelled else { break }
 
                     currentApps[idx].appSizeBytes = appSize
                     currentApps[idx].dataSizeBytes = dataSize
@@ -200,15 +217,15 @@ public final class AppsViewModel: ObservableObject {
                         let nextIdx = orderedIndices[nextToSubmit]
                         let nextApp = currentApps[nextIdx]
                         group.addTask {
-                            let sizes = await sizeOnUtilityQueue(nextApp)
+                            let sizes = await sizeOnDedicatedQueue(nextApp)
                             return (nextIdx, sizes.0, sizes.1, sizes.2)
                         }
                         nextToSubmit += 1
                     }
 
-                    // Smooth UI streaming: push updates every 3 completed apps or every 0.25s
+                    // Smooth UI streaming: push updates every 2 completed apps or every 0.15s
                     let now = Date()
-                    if completedBatchCount >= 3 || now.timeIntervalSince(lastUIUpdateTime) >= 0.25 || nextToSubmit == orderedIndices.count {
+                    if completedBatchCount >= 2 || now.timeIntervalSince(lastUIUpdateTime) >= 0.15 || nextToSubmit == orderedIndices.count {
                         let snapshot = currentApps
                         await MainActor.run {
                             self.apps = snapshot
