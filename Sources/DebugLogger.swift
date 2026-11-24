@@ -153,8 +153,7 @@ public struct DebugLogsView: View {
                         ForEach(categories, id: \.self) { cat in
                             Button(action: { selectedCategory = cat }) {
                                 Text(cat)
-                                    .font(.caption)
-                                    .fontWeight(selectedCategory == cat ? .bold : .regular)
+                                    .font(.caption.weight(selectedCategory == cat ? .bold : .regular))
                                     .padding(.horizontal, 10)
                                     .padding(.vertical, 5)
                                     .background(selectedCategory == cat ? Color.blue : Color(UIColor.secondarySystemBackground))

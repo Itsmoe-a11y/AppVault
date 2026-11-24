@@ -603,20 +603,20 @@ public final class AppDiscoveryService {
                     }
                 }
 
-                let dType = Int32(entry.pointee.d_type)
-                if dType == DT_LNK {
+                let dType = Int(entry.pointee.d_type)
+                if dType == Int(DT_LNK) {
                     continue
                 }
 
                 withUnsafePointer(to: &entry.pointee.d_name) { nameTuplePtr in
-                    nameTuplePtr.withMemoryRebound(to: CChar.self, capacity: 1024) { cName in
+                    nameTuplePtr.withMemoryRebound(to: CChar.self, capacity: MemoryLayout.size(ofValue: entry.pointee.d_name)) { cName in
                         // Fast-path skip "." (46, 0) and ".." (46, 46, 0) without String allocation
                         if cName[0] == 46 {
                             if cName[1] == 0 { return }
                             if cName[1] == 46 && cName[2] == 0 { return }
                         }
 
-                        if dType == DT_REG {
+                        if dType == Int(DT_REG) {
                             var st = stat()
                             if dfd >= 0 {
                                 if fstatat(dfd, cName, &st, AT_SYMLINK_NOFOLLOW) == 0 {
@@ -628,10 +628,10 @@ public final class AppDiscoveryService {
                                     totalSize += Int64(st.st_size)
                                 }
                             }
-                        } else if dType == DT_DIR {
+                        } else if dType == Int(DT_DIR) {
                             let childName = String(cString: cName)
                             dirStack.append(currentDir.hasSuffix("/") ? currentDir + childName : currentDir + "/" + childName)
-                        } else if dType == DT_UNKNOWN {
+                        } else if dType == Int(DT_UNKNOWN) {
                             var st = stat()
                             let ok: Bool
                             if dfd >= 0 {

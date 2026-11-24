@@ -2,7 +2,9 @@ import Foundation
 import UIKit
 import Darwin
 import os
-import os.proc
+
+@_silgen_name("os_proc_available_memory")
+private func sys_os_proc_available_memory() -> size_t
 
 // MARK: - Thread-Safe Device Info Snapshot (Avoids @MainActor UIDevice calls on background threads)
 public enum DeviceInfoSnapshot {
@@ -141,7 +143,8 @@ public enum UploadBufferProfile: String, Codable, CaseIterable, Identifiable {
 
     /// Live remaining Jetsam memory headroom for this process (bytes) via Apple os_proc_available_memory().
     public static func availableRAMHeadroomBytes() -> Int64 {
-        return Int64(os_proc_available_memory())
+        let mem = sys_os_proc_available_memory()
+        return mem > 0 ? Int64(mem) : 512 * 1_048_576
     }
 
     /// Computes an exact 256 KB-aligned chunk size for Google Drive resumable upload,

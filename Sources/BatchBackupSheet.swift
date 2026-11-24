@@ -98,7 +98,7 @@ public struct BatchBackupSheet: View {
                                         .frame(width: 24)
                                     Text(dest.title)
                                         .foregroundColor(.primary)
-                                        .fontWeight(selectedDestination == dest ? .semibold : .regular)
+                                        .font(.body.weight(selectedDestination == dest ? .semibold : .regular))
                                     Spacer()
                                     if selectedDestination == dest {
                                         Image(systemName: "checkmark.circle.fill")

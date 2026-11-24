@@ -254,8 +254,7 @@ public struct SettingsView: View {
                                             Image(systemName: "hand.raised.fill")
                                             Text("Private Sheet")
                                         }
-                                        .font(.caption)
-                                        .fontWeight(.semibold)
+                                        .font(.caption.weight(.semibold))
                                         .foregroundColor(.blue)
                                         .frame(maxWidth: .infinity)
                                         .padding(.vertical, 8)
@@ -271,8 +270,7 @@ public struct SettingsView: View {
                                             Image(systemName: "safari")
                                             Text("External Browser")
                                         }
-                                        .font(.caption)
-                                        .fontWeight(.semibold)
+                                        .font(.caption.weight(.semibold))
                                         .foregroundColor(.blue)
                                         .frame(maxWidth: .infinity)
                                         .padding(.vertical, 8)
@@ -345,8 +343,7 @@ public struct SettingsView: View {
                                             )
                                         }
                                         .buttonStyle(BorderlessButtonStyle())
-                                        .font(.caption)
-                                        .fontWeight(.semibold)
+                                        .font(.caption.weight(.semibold))
                                         .foregroundColor(.white)
                                         .frame(maxWidth: .infinity)
                                         .padding(.vertical, 8)
@@ -519,8 +516,7 @@ public struct SettingsView: View {
                                             _ = rclone.importGoogleDriveTokens(from: remote)
                                         }) {
                                             Text("Connect Google Drive")
-                                                .font(.caption)
-                                                .fontWeight(.semibold)
+                                                .font(.caption.weight(.semibold))
                                                 .foregroundColor(.white)
                                                 .padding(.horizontal, 10)
                                                 .padding(.vertical, 6)
@@ -1138,7 +1134,7 @@ public struct RcloneConfSheet: View {
                         HStack {
                             Spacer()
                             Text("Parse & Save Remotes")
-                                .fontWeight(.semibold)
+                                .font(.body.weight(.semibold))
                             Spacer()
                         }
                     }
