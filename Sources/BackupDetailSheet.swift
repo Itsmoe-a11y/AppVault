@@ -102,12 +102,12 @@ public struct BackupDetailSheet: View {
                 // Section 1: Target App Info
                 Section {
                     HStack(spacing: 16) {
-                        Image(systemName: app.isSystemApp ? "gearshape.fill" : "app.fill")
-                            .font(.system(size: 34))
-                            .foregroundColor(app.isSystemApp ? .gray : .blue)
-                            .frame(width: 48, height: 48)
-                            .background(Color(UIColor.tertiarySystemFill))
-                            .cornerRadius(12)
+                        AppIconView(
+                            bundleIdentifier: app.bundleIdentifier,
+                            bundleURL: app.bundleURL,
+                            isSystemApp: app.isSystemApp,
+                            size: 50
+                        )
 
                         VStack(alignment: .leading, spacing: 4) {
                             Text(app.name)

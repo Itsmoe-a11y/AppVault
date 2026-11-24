@@ -1,12 +1,18 @@
 import SwiftUI
 
-// MARK: - Batch Result Item
 public struct BatchAppResult: Identifiable {
     public let id = UUID()
     public let appName: String
     public let bundleIdentifier: String
     public let isSuccess: Bool
     public let errorMessage: String?
+}
+
+public enum BatchItemStatus: Equatable {
+    case waiting
+    case running(detail: String, fraction: Double)
+    case succeeded
+    case failed(String)
 }
 
 public struct BatchBackupSheet: View {
@@ -17,27 +23,58 @@ public struct BatchBackupSheet: View {
     @ObservedObject var webdav = WebDAVService.shared
 
     @State private var selectedMode: BackupMode
-    @State private var selectedDestination: BackupDestination = .local
+    @State private var selectedDestination: BackupDestination
     @State private var includeCaches: Bool
     @State private var includeKeychain: Bool = true
     @State private var includeAppGroups: Bool = true
     @State private var compressionLevel: BackupCompressionLevel = SettingsViewModel.savedDefaultCompressionLevel
     @State private var bufferProfile: UploadBufferProfile = SettingsViewModel.savedUploadBufferProfile
+    @State private var maxConcurrency: Int = 2
     @State private var enableEncryption: Bool = false
     @State private var encryptionPassword: String = ""
+
     @State private var isExecuting: Bool = false
     @State private var isCompleted: Bool = false
-    @State private var currentAppIndex: Int = 0
-    @State private var currentAppName: String = ""
-    @State private var currentProgress: Double = 0.0
-    @State private var statusLog: String = ""
+    @State private var itemStatuses: [String: BatchItemStatus] = [:]
     @State private var results: [BatchAppResult] = []
     @State private var batchTask: Task<Void, Never>? = nil
+
+    private static func availableLocalDiskSpaceBytes() -> Int64 {
+        let probeURL = URL(fileURLWithPath: "/var/mobile")
+        if let vals = try? probeURL.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey, .volumeAvailableCapacityKey]) {
+            if let important = vals.volumeAvailableCapacityForImportantUsage, important > 0 {
+                return important
+            }
+            if let regular = vals.volumeAvailableCapacity, regular > 0 {
+                return Int64(regular)
+            }
+        }
+        return Int64.max
+    }
 
     public init(apps: [InstalledApp]) {
         self.apps = apps
         _selectedMode = State(initialValue: SettingsViewModel.savedDefaultBackupMode)
         _includeCaches = State(initialValue: SettingsViewModel.savedDefaultIncludeCaches)
+
+        let savedRaw = UserDefaults.standard.string(forKey: "appvault_last_backup_destination")
+        var initialDest: BackupDestination = .local
+        if let raw = savedRaw, let saved = BackupDestination(rawValue: raw) {
+            if saved == .googleDrive && GoogleDriveService.shared.isAuthenticated {
+                initialDest = .googleDrive
+            } else if saved == .webdav && WebDAVService.shared.isConfigured {
+                initialDest = .webdav
+            } else {
+                initialDest = .local
+            }
+        } else if GoogleDriveService.shared.isAuthenticated {
+            let estimated = apps.reduce(Int64(0)) { $0 + $1.totalSizeBytes }
+            let freeBytes = Self.availableLocalDiskSpaceBytes()
+            if estimated > 0 && estimated > (freeBytes / 2) {
+                initialDest = .googleDrive
+            }
+        }
+        _selectedDestination = State(initialValue: initialDest)
     }
 
     private var successCount: Int {
@@ -46,6 +83,18 @@ public struct BatchBackupSheet: View {
 
     private var failureCount: Int {
         results.filter { !$0.isSuccess }.count
+    }
+
+    private var overallProgress: Double {
+        guard !apps.isEmpty else { return 0 }
+        let totalUnits = apps.reduce(0.0) { acc, app in
+            switch itemStatuses[app.bundleIdentifier] ?? .waiting {
+            case .waiting: return acc
+            case .running(_, let fraction): return acc + min(0.98, max(0.02, fraction))
+            case .succeeded, .failed: return acc + 1.0
+            }
+        }
+        return min(1.0, totalUnits / Double(apps.count))
     }
 
     private var estimatedBytes: Int64 {
@@ -66,25 +115,72 @@ public struct BatchBackupSheet: View {
     public var body: some View {
         NavigationView {
             Form {
-                // Section 1: Batch Overview
-                Section(header: Text("Batch Overview")) {
-                    HStack {
-                        Label("Selected Apps", systemImage: "square.stack.3d.up.fill")
-                        Spacer()
-                        Text("\(apps.count) Apps")
-                            .font(.system(size: 14, weight: .bold))
-                            .foregroundColor(.blue)
-                    }
+                // Section 1: Selected Apps with Real App Icons
+                Section(header: Text("Selected Apps (\(apps.count) • \(ByteCountFormatter.string(fromByteCount: estimatedBytes, countStyle: .file)))")) {
+                    ForEach(apps) { app in
+                        HStack(spacing: 12) {
+                            AppIconView(
+                                bundleIdentifier: app.bundleIdentifier,
+                                bundleURL: app.bundleURL,
+                                isSystemApp: app.isSystemApp,
+                                size: 36
+                            )
 
-                    HStack {
-                        Label("Estimated Size", systemImage: "folder.fill")
-                        Spacer()
-                        Text(ByteCountFormatter.string(fromByteCount: estimatedBytes, countStyle: .file))
-                            .foregroundColor(.secondary)
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(app.name)
+                                    .font(.system(size: 14, weight: .semibold))
+                                    .lineLimit(1)
+
+                                switch itemStatuses[app.bundleIdentifier] ?? .waiting {
+                                case .waiting:
+                                    Text(app.isSized ? ByteCountFormatter.string(fromByteCount: app.totalSizeBytes, countStyle: .file) : "Queued")
+                                        .font(.caption2)
+                                        .foregroundColor(.secondary)
+                                case .running(let detail, _):
+                                    Text(detail)
+                                        .font(.caption2)
+                                        .foregroundColor(.blue)
+                                        .lineLimit(1)
+                                case .succeeded:
+                                    Text("Backup complete")
+                                        .font(.caption2)
+                                        .foregroundColor(.green)
+                                case .failed(let msg):
+                                    Text(msg)
+                                        .font(.caption2)
+                                        .foregroundColor(.red)
+                                        .lineLimit(2)
+                                }
+                            }
+
+                            Spacer()
+
+                            switch itemStatuses[app.bundleIdentifier] ?? .waiting {
+                            case .waiting:
+                                Text("Queued")
+                                    .font(.caption2)
+                                    .foregroundColor(.secondary)
+                            case .running(_, let fraction):
+                                HStack(spacing: 4) {
+                                    ProgressView()
+                                        .scaleEffect(0.75)
+                                    Text("\(Int(fraction * 100))%")
+                                        .font(.caption2.bold())
+                                        .foregroundColor(.blue)
+                                }
+                            case .succeeded:
+                                Image(systemName: "checkmark.circle.fill")
+                                    .foregroundColor(.green)
+                            case .failed:
+                                Image(systemName: "exclamationmark.triangle.fill")
+                                    .foregroundColor(.red)
+                            }
+                        }
+                        .padding(.vertical, 2)
                     }
                 }
 
-                // Section 2: Destination & Mode (only editable before starting)
+                // Section 2: Destination & Options (only editable before starting)
                 if !isExecuting && !isCompleted {
                     Section(header: Text("Destination")) {
                         ForEach(BackupDestination.allCases) { dest in
@@ -111,9 +207,16 @@ public struct BatchBackupSheet: View {
                         }
 
                         if selectedDestination == .googleDrive && !googleDrive.isAuthenticated {
-                            Text("Google Drive is not signed in. Sign in under Settings first.")
-                                .font(.caption)
-                                .foregroundColor(.orange)
+                            VStack(alignment: .leading, spacing: 6) {
+                                Text("Google Drive is not signed in.")
+                                    .font(.caption)
+                                    .foregroundColor(.orange)
+                                Button(action: { googleDrive.signIn() }) {
+                                    Label("Sign In with Google", systemImage: "person.badge.key.fill")
+                                        .font(.caption.bold())
+                                }
+                                .buttonStyle(BorderlessButtonStyle())
+                            }
                         } else if selectedDestination == .webdav && !webdav.isConfigured {
                             Text("WebDAV is not configured. Configure your server in Settings first.")
                                 .font(.caption)
@@ -121,13 +224,30 @@ public struct BatchBackupSheet: View {
                         }
                     }
 
-                    Section(header: Text("Backup Mode & Components")) {
+                    Section(header: Text("Backup Mode, Parallelism & Compression")) {
                         Picker("Mode", selection: $selectedMode) {
                             ForEach(BackupMode.allCases) { mode in
                                 Text(mode.title).tag(mode)
                             }
                         }
                         .pickerStyle(SegmentedPickerStyle())
+
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("Simultaneous Backups")
+                                .font(.subheadline)
+                            Picker("Simultaneous Backups", selection: $maxConcurrency) {
+                                Text("1 at a time").tag(1)
+                                Text("2 Parallel").tag(2)
+                                Text("3 Parallel").tag(3)
+                            }
+                            .pickerStyle(SegmentedPickerStyle())
+                            Text(maxConcurrency > 1
+                                 ? "Runs up to \(maxConcurrency) app backups simultaneously for faster batch completion."
+                                 : "Backs up apps one after another sequentially.")
+                                .font(.caption2)
+                                .foregroundColor(.secondary)
+                        }
+                        .padding(.vertical, 2)
 
                         Picker("Compression", selection: $compressionLevel) {
                             ForEach(BackupCompressionLevel.allCases) { lvl in
@@ -155,43 +275,28 @@ public struct BatchBackupSheet: View {
                     }
                 }
 
-                // Section 3: Active Execution Progress
+                // Section 3: Active Execution Overall Progress
                 if isExecuting {
-                    Section(header: Text("Queue Progress")) {
+                    Section(header: Text("Overall Progress (\(selectedDestination.title))")) {
                         VStack(alignment: .leading, spacing: 10) {
-                            HStack {
-                                Text("App \(currentAppIndex + 1) of \(apps.count)")
-                                    .font(.system(size: 14, weight: .bold))
-                                Spacer()
-                                Text(currentAppName)
-                                    .font(.subheadline)
-                                    .foregroundColor(.blue)
-                            }
-
-                            ProgressView(value: currentProgress)
+                            ProgressView(value: overallProgress)
                                 .progressViewStyle(LinearProgressViewStyle(tint: .blue))
 
                             HStack {
-                                Text("\(Int(currentProgress * 100))%")
-                                    .font(.caption2)
-                                    .foregroundColor(.secondary)
+                                Text("\(Int(overallProgress * 100))% overall")
+                                    .font(.caption.bold())
                                 Spacer()
                                 Text("\(successCount) done \u{2022} \(failureCount) failed")
                                     .font(.caption2)
                                     .foregroundColor(.secondary)
                             }
-
-                            Text(statusLog)
-                                .font(.caption2)
-                                .foregroundColor(.secondary)
-                                .lineLimit(2)
                         }
                         .padding(.vertical, 4)
 
                         Button(role: .destructive, action: cancelBatchProcess) {
                             HStack {
                                 Spacer()
-                                Label("Cancel Remaining Queue", systemImage: "stop.circle.fill")
+                                Label("Cancel Remaining Backups", systemImage: "stop.circle.fill")
                                     .foregroundColor(.red)
                                 Spacer()
                             }
@@ -220,17 +325,6 @@ public struct BatchBackupSheet: View {
                                     .font(.system(size: 13, weight: .bold))
                                     .foregroundColor(.red)
                             }
-
-                            ForEach(results.filter { !$0.isSuccess }) { res in
-                                VStack(alignment: .leading, spacing: 2) {
-                                    Text(res.appName)
-                                        .font(.system(size: 13, weight: .semibold))
-                                    Text(res.errorMessage ?? "Unknown error")
-                                        .font(.caption2)
-                                        .foregroundColor(.red)
-                                }
-                                .padding(.vertical, 2)
-                            }
                         }
                     }
                 }
@@ -253,7 +347,7 @@ public struct BatchBackupSheet: View {
                         Button(action: startBatchProcess) {
                             HStack {
                                 Spacer()
-                                Label("Start Batch Backup (\(apps.count) Apps)", systemImage: "play.circle.fill")
+                                Label("Start Backup (\(apps.count) Apps)", systemImage: "play.circle.fill")
                                     .font(.system(size: 15, weight: .bold))
                                     .foregroundColor(.white)
                                 Spacer()
@@ -265,7 +359,7 @@ public struct BatchBackupSheet: View {
                     }
                 }
             }
-            .navigationTitle("Batch Backup")
+            .navigationTitle("Multi-App Backup")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
@@ -286,14 +380,17 @@ public struct BatchBackupSheet: View {
         batchTask = nil
         isExecuting = false
         isCompleted = true
-        statusLog = "Queue cancelled by user."
     }
 
     private func startBatchProcess() {
         isExecuting = true
         isCompleted = false
         results.removeAll()
-        currentProgress = 0.0
+        var initialStates: [String: BatchItemStatus] = [:]
+        for app in apps {
+            initialStates[app.bundleIdentifier] = .waiting
+        }
+        itemStatuses = initialStates
 
         let targetApps = apps
         let destination = selectedDestination
@@ -302,25 +399,25 @@ public struct BatchBackupSheet: View {
         let keychain = includeKeychain
         let groups = includeAppGroups
         let selectedCompression = compressionLevel
-        let selectedBuffer = bufferProfile
+        let concurrency = max(1, min(3, maxConcurrency))
+        // Scale Drive buffer down safely when running 2-3 simultaneous backups so Jetsam stays happy
+        let selectedBuffer: UploadBufferProfile = (concurrency > 1 && bufferProfile == .maxRAM) ? .fast : ((concurrency > 2 && bufferProfile == .turbo) ? .fast : bufferProfile)
         let password = enableEncryption ? encryptionPassword : nil
         let retentionLimit = SettingsViewModel.savedMaxBackupsPerApp
 
         batchTask = Task(priority: .userInitiated) {
-            let total = targetApps.count
-            var wasCancelled = false
+            BackupEngine.shared.beginKeepAwake()
+            defer { BackupEngine.shared.endKeepAwake() }
 
-            for (idx, target) in targetApps.enumerated() {
+            var nextIdx = 0
+
+            func runSingleBackup(for target: InstalledApp) async -> BatchAppResult {
                 if Task.isCancelled {
-                    wasCancelled = true
-                    break
+                    return BatchAppResult(appName: target.name, bundleIdentifier: target.bundleIdentifier, isSuccess: false, errorMessage: "Cancelled")
                 }
 
                 await MainActor.run {
-                    self.currentAppIndex = idx
-                    self.currentAppName = target.name
-                    self.currentProgress = Double(idx) / Double(max(total, 1))
-                    self.statusLog = "Backing up \(target.name)..."
+                    self.itemStatuses[target.bundleIdentifier] = .running(detail: "Starting...", fraction: 0.02)
                 }
 
                 do {
@@ -337,7 +434,7 @@ public struct BatchBackupSheet: View {
                             note: "Batch Backup"
                         ) { p in
                             Task { @MainActor in
-                                self.statusLog = p.statusDetail
+                                self.itemStatuses[target.bundleIdentifier] = .running(detail: p.statusDetail, fraction: p.fractionCompleted)
                             }
                         }
                     } else if destination == .webdav {
@@ -352,7 +449,7 @@ public struct BatchBackupSheet: View {
                             note: "Batch Backup"
                         ) { p in
                             Task { @MainActor in
-                                self.statusLog = p.statusDetail
+                                self.itemStatuses[target.bundleIdentifier] = .running(detail: p.statusDetail, fraction: p.fractionCompleted)
                             }
                         }
                     } else {
@@ -363,50 +460,55 @@ public struct BatchBackupSheet: View {
                             includeKeychain: keychain,
                             includeAppGroups: groups,
                             encryptionPassword: password,
+                            compressionLevel: selectedCompression,
                             note: "Batch Backup"
                         ) { p in
                             Task { @MainActor in
-                                self.statusLog = p.statusDetail
+                                self.itemStatuses[target.bundleIdentifier] = .running(detail: p.statusDetail, fraction: p.fractionCompleted)
                             }
                         }
                         if retentionLimit > 0 {
                             BackupEngine.shared.pruneOldBackups(for: target.bundleIdentifier, keepNewest: retentionLimit)
                         }
                     }
-
-                    await MainActor.run {
-                        self.results.append(BatchAppResult(
-                            appName: target.name,
-                            bundleIdentifier: target.bundleIdentifier,
-                            isSuccess: true,
-                            errorMessage: nil
-                        ))
-                    }
+                    return BatchAppResult(appName: target.name, bundleIdentifier: target.bundleIdentifier, isSuccess: true, errorMessage: nil)
                 } catch {
+                    return BatchAppResult(appName: target.name, bundleIdentifier: target.bundleIdentifier, isSuccess: false, errorMessage: error.localizedDescription)
+                }
+            }
+
+            await withTaskGroup(of: BatchAppResult.self) { group in
+                while nextIdx < targetApps.count && nextIdx < concurrency {
+                    let target = targetApps[nextIdx]
+                    nextIdx += 1
+                    group.addTask {
+                        await runSingleBackup(for: target)
+                    }
+                }
+
+                for await res in group {
                     await MainActor.run {
-                        self.results.append(BatchAppResult(
-                            appName: target.name,
-                            bundleIdentifier: target.bundleIdentifier,
-                            isSuccess: false,
-                            errorMessage: error.localizedDescription
-                        ))
-                        self.statusLog = "Error on \(target.name): \(error.localizedDescription)"
+                        self.results.append(res)
+                        self.itemStatuses[res.bundleIdentifier] = res.isSuccess ? .succeeded : .failed(res.errorMessage ?? "Error")
+                    }
+
+                    if !Task.isCancelled && nextIdx < targetApps.count {
+                        let nextTarget = targetApps[nextIdx]
+                        nextIdx += 1
+                        group.addTask {
+                            await runSingleBackup(for: nextTarget)
+                        }
                     }
                 }
             }
 
-            if Task.isCancelled {
-                wasCancelled = true
-            }
-
-            let cancelledFinal = wasCancelled
+            let wasCancelled = Task.isCancelled
             await MainActor.run {
-                self.currentProgress = 1.0
                 self.isExecuting = false
                 self.isCompleted = true
                 self.backupsVM.refreshBackups()
 
-                if self.failureCount == 0 && !cancelledFinal {
+                if self.failureCount == 0 && !wasCancelled {
                     DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
                         self.presentationMode.wrappedValue.dismiss()
                     }

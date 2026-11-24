@@ -19,8 +19,21 @@ public enum AppListSheet: Identifiable {
 @MainActor
 public final class AppsViewModel: ObservableObject {
     @Published public var apps: [InstalledApp] = []
+    private static let sortOrderKey = "appvault_apps_sort_order_v1"
+
     @Published public var searchQuery: String = ""
     @Published public var showSystemApps: Bool = false
+    @Published public var sortOrder: AppSortOrder = {
+        if let raw = UserDefaults.standard.string(forKey: "appvault_apps_sort_order_v1"),
+           let parsed = AppSortOrder(rawValue: raw) {
+            return parsed
+        }
+        return .nameAZ
+    }() {
+        didSet {
+            UserDefaults.standard.set(sortOrder.rawValue, forKey: Self.sortOrderKey)
+        }
+    }
     @Published public var isScanning: Bool = false
 
     // Unified Sheet Presentation to avoid iOS 15 multi-sheet collisions
@@ -92,7 +105,7 @@ public final class AppsViewModel: ObservableObject {
     }
 
     public var filteredApps: [InstalledApp] {
-        apps.filter { app in
+        let base = apps.filter { app in
             let matchesScope = showSystemApps ? true : !app.isSystemApp
             guard matchesScope else { return false }
 
@@ -105,10 +118,50 @@ public final class AppsViewModel: ObservableObject {
             return app.name.lowercased().contains(q) ||
                    app.bundleIdentifier.lowercased().contains(q)
         }
+
+        switch sortOrder {
+        case .nameAZ:
+            return base.sorted {
+                $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending
+            }
+        case .totalSizeDesc:
+            return base.sorted { lhs, rhs in
+                if lhs.isSized != rhs.isSized { return lhs.isSized && !rhs.isSized }
+                if lhs.totalSizeBytes != rhs.totalSizeBytes { return lhs.totalSizeBytes > rhs.totalSizeBytes }
+                return lhs.name.localizedCaseInsensitiveCompare(rhs.name) == .orderedAscending
+            }
+        case .dataSizeDesc:
+            return base.sorted { lhs, rhs in
+                if lhs.isSized != rhs.isSized { return lhs.isSized && !rhs.isSized }
+                let lData = lhs.dataSizeBytes + lhs.groupSizeBytes
+                let rData = rhs.dataSizeBytes + rhs.groupSizeBytes
+                if lData != rData { return lData > rData }
+                return lhs.name.localizedCaseInsensitiveCompare(rhs.name) == .orderedAscending
+            }
+        case .appSizeDesc:
+            return base.sorted { lhs, rhs in
+                if lhs.isSized != rhs.isSized { return lhs.isSized && !rhs.isSized }
+                if lhs.appSizeBytes != rhs.appSizeBytes { return lhs.appSizeBytes > rhs.appSizeBytes }
+                return lhs.name.localizedCaseInsensitiveCompare(rhs.name) == .orderedAscending
+            }
+        case .sizeAsc:
+            return base.sorted { lhs, rhs in
+                if lhs.isSized != rhs.isSized { return lhs.isSized && !rhs.isSized }
+                if lhs.totalSizeBytes != rhs.totalSizeBytes { return lhs.totalSizeBytes < rhs.totalSizeBytes }
+                return lhs.name.localizedCaseInsensitiveCompare(rhs.name) == .orderedAscending
+            }
+        }
     }
 
     public var selectedApps: [InstalledApp] {
-        apps.filter { selectedAppIDs.contains($0.bundleIdentifier) }
+        let visible = filteredApps
+        let visibleIDs = Set(visible.map(\.bundleIdentifier))
+        return visible.filter { selectedAppIDs.contains($0.bundleIdentifier) }
+            + apps.filter { selectedAppIDs.contains($0.bundleIdentifier) && !visibleIDs.contains($0.bundleIdentifier) }
+    }
+
+    public var selectedTotalSizeBytes: Int64 {
+        selectedApps.reduce(0) { $0 + $1.totalSizeBytes }
     }
 
     public func toggleSelection(for app: InstalledApp) {

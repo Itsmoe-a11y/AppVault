@@ -114,6 +114,12 @@ jobs:
                - Selectable compression levels (Store / Fast Level 1 / Balanced Level 6 / Max Level 9) with 256 KB zlib buffer and 4x fewer syscalls.
             10. 🚀 **Dynamic RAM Headroom Upload Buffer & Double-Buffering**:
                - Parallel overlapped upload tasks (uploads chunk N over Wi-Fi while reading/compressing chunk N+1 in RAM) with live `os_proc_available_memory()` RAM headroom scaling (up to 128 MB chunks).
+            11. 🎨 **Native App Icon Extraction & Dual-Tier Cache**:
+               - Renders high-resolution native app icons with SpringBoard and bundle extractors, continuous squircle masks, and disk caching across local and cloud backups.
+            12. 📊 **App Sorting & Sizing Suite**:
+               - Sort applications by Largest Total Size, Data Size, App Size, or Name A-Z with real-time sizing indicators.
+            13. ⚡ **Concurrent Multi-Backup Worker Pool & Inline Selection**:
+               - In-line app selection mode with sticky bottom action bar, worker concurrency pool (1-3 workers), and live per-app progress cards.
 
             ### Installation:
             - **TrollStore**: Download `AppVault.tipa` (or `AppVault.ipa`) and open in TrollStore.

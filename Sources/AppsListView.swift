@@ -30,12 +30,74 @@ public struct AppsListView: View {
                 .padding(.top, 8)
                 .padding(.bottom, 6)
 
-                // Scope Selector
-                Picker("App Scope", selection: $appsVM.showSystemApps) {
-                    Text("User Apps").tag(false)
-                    Text("All (System Included)").tag(true)
+                // Scope Selector + Sort by Size & Multi-Backup Bar
+                VStack(spacing: 8) {
+                    Picker("App Scope", selection: $appsVM.showSystemApps) {
+                        Text("User Apps").tag(false)
+                        Text("All (System Included)").tag(true)
+                    }
+                    .pickerStyle(SegmentedPickerStyle())
+
+                    HStack(spacing: 8) {
+                        Menu {
+                            ForEach(AppSortOrder.allCases) { order in
+                                Button(action: { appsVM.sortOrder = order }) {
+                                    HStack {
+                                        Text(order.title)
+                                        if appsVM.sortOrder == order {
+                                            Image(systemName: "checkmark")
+                                        }
+                                    }
+                                }
+                            }
+                        } label: {
+                            HStack(spacing: 5) {
+                                Image(systemName: "arrow.up.arrow.down")
+                                    .font(.system(size: 12, weight: .semibold))
+                                Text("Sort: \(appsVM.sortOrder.shortLabel)")
+                                    .font(.system(size: 12, weight: .semibold))
+                                Image(systemName: "chevron.down")
+                                    .font(.system(size: 10))
+                            }
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 6)
+                            .background(Color(UIColor.secondarySystemBackground))
+                            .foregroundColor(appsVM.sortOrder == .nameAZ ? .primary : .blue)
+                            .cornerRadius(8)
+                        }
+
+                        if appsVM.isScanning {
+                            HStack(spacing: 4) {
+                                ProgressView()
+                                    .scaleEffect(0.75)
+                                Text("Sizing...")
+                                    .font(.caption2)
+                                    .foregroundColor(.secondary)
+                            }
+                        }
+
+                        Spacer()
+
+                        Button(action: {
+                            appsVM.isSelectionMode.toggle()
+                            if !appsVM.isSelectionMode {
+                                appsVM.clearSelection()
+                            }
+                        }) {
+                            HStack(spacing: 5) {
+                                Image(systemName: appsVM.isSelectionMode ? "checkmark.circle.fill" : "checklist")
+                                    .font(.system(size: 12, weight: .semibold))
+                                Text(appsVM.isSelectionMode ? "Done Selecting" : "Multi-Backup")
+                                    .font(.system(size: 12, weight: .semibold))
+                            }
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 6)
+                            .background(appsVM.isSelectionMode ? Color.blue.opacity(0.15) : Color(UIColor.secondarySystemBackground))
+                            .foregroundColor(.blue)
+                            .cornerRadius(8)
+                        }
+                    }
                 }
-                .pickerStyle(SegmentedPickerStyle())
                 .padding(.horizontal)
                 .padding(.bottom, 8)
 
@@ -72,6 +134,30 @@ public struct AppsListView: View {
                                 onBackupTap: { appsVM.activeSheet = .backup(app) },
                                 onExploreTap: { appsVM.activeSheet = .explore(app) }
                             )
+                            .contentShape(Rectangle())
+                            .onTapGesture {
+                                if appsVM.isSelectionMode {
+                                    appsVM.toggleSelection(for: app)
+                                }
+                            }
+                            .contextMenu {
+                                Button(action: { appsVM.activeSheet = .backup(app) }) {
+                                    Label("Back Up This App", systemImage: "arrow.down.doc.fill")
+                                }
+                                Button(action: {
+                                    if !appsVM.isSelectionMode {
+                                        appsVM.isSelectionMode = true
+                                    }
+                                    if !appsVM.selectedAppIDs.contains(app.bundleIdentifier) {
+                                        appsVM.selectedAppIDs.insert(app.bundleIdentifier)
+                                    }
+                                }) {
+                                    Label("Add to Multi-App Backup", systemImage: "checklist")
+                                }
+                                Button(action: { appsVM.activeSheet = .explore(app) }) {
+                                    Label("Browse Container Files", systemImage: "folder.badge.gearshape")
+                                }
+                            }
                         }
                     }
                     .listStyle(PlainListStyle())
@@ -84,18 +170,31 @@ public struct AppsListView: View {
                 if appsVM.isSelectionMode && !appsVM.selectedAppIDs.isEmpty {
                     VStack(spacing: 0) {
                         Divider()
-                        HStack {
-                            Text("\(appsVM.selectedAppIDs.count) Selected")
-                                .font(.system(size: 14, weight: .bold))
+                        HStack(spacing: 10) {
+                            VStack(alignment: .leading, spacing: 1) {
+                                Text("\(appsVM.selectedAppIDs.count) App\(appsVM.selectedAppIDs.count == 1 ? "" : "s") Selected")
+                                    .font(.system(size: 14, weight: .bold))
+                                if appsVM.selectedTotalSizeBytes > 0 {
+                                    Text("Est. \(ByteCountFormatter.string(fromByteCount: appsVM.selectedTotalSizeBytes, countStyle: .file))")
+                                        .font(.caption2)
+                                        .foregroundColor(.secondary)
+                                }
+                            }
 
                             Spacer()
+
+                            Button("Clear") {
+                                appsVM.clearSelection()
+                            }
+                            .font(.system(size: 13, weight: .medium))
+                            .foregroundColor(.secondary)
 
                             Button(action: {
                                 appsVM.activeSheet = .batchBackup(appsVM.selectedApps)
                             }) {
                                 HStack(spacing: 6) {
                                     Image(systemName: "square.and.arrow.down.on.square.fill")
-                                    Text("Batch Backup")
+                                    Text("Backup \(appsVM.selectedAppIDs.count)")
                                 }
                                 .font(.system(size: 14, weight: .bold))
                                 .foregroundColor(.white)
@@ -176,12 +275,12 @@ struct AppRowView: View {
                 .buttonStyle(BorderlessButtonStyle())
             }
 
-            Image(systemName: app.isSystemApp ? "gearshape.fill" : "app.fill")
-                .font(.system(size: 26))
-                .foregroundColor(app.isSystemApp ? .gray : .blue)
-                .frame(width: 40, height: 40)
-                .background(Color(UIColor.tertiarySystemFill))
-                .cornerRadius(10)
+            AppIconView(
+                bundleIdentifier: app.bundleIdentifier,
+                bundleURL: app.bundleURL,
+                isSystemApp: app.isSystemApp,
+                size: 42
+            )
 
             VStack(alignment: .leading, spacing: 3) {
                 HStack {

@@ -45,9 +45,12 @@ public struct SelectiveRestoreSheet: View {
                 // Section 1: Target Info
                 Section(header: Text("Target Application")) {
                     HStack(spacing: 14) {
-                        Image(systemName: record.isEncrypted ? "lock.shield.fill" : (record.mode == .full ? "shippingbox.fill" : "internaldrive.fill"))
-                            .font(.system(size: 28))
-                            .foregroundColor(record.isEncrypted ? .orange : (record.mode == .full ? .purple : .blue))
+                        AppIconView(
+                            bundleIdentifier: record.bundleIdentifier,
+                            fallbackSystemName: record.mode == .full ? "shippingbox.fill" : "internaldrive.fill",
+                            fallbackColor: record.mode == .full ? .purple : .blue,
+                            size: 44
+                        )
 
                         VStack(alignment: .leading, spacing: 2) {
                             Text(record.appName)

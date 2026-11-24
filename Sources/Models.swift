@@ -25,6 +25,37 @@ public enum DeviceInfoSnapshot {
     }()
 }
 
+// MARK: - Installed Apps Sort Order
+public enum AppSortOrder: String, Codable, CaseIterable, Identifiable {
+    case nameAZ = "NameAZ"
+    case totalSizeDesc = "TotalSizeDesc"
+    case dataSizeDesc = "DataSizeDesc"
+    case appSizeDesc = "AppSizeDesc"
+    case sizeAsc = "SizeAsc"
+
+    public var id: String { rawValue }
+
+    public var title: String {
+        switch self {
+        case .nameAZ: return "Name (A–Z)"
+        case .totalSizeDesc: return "Largest Total Size"
+        case .dataSizeDesc: return "Largest Data Size"
+        case .appSizeDesc: return "Largest App Size"
+        case .sizeAsc: return "Smallest Size First"
+        }
+    }
+
+    public var shortLabel: String {
+        switch self {
+        case .nameAZ: return "A–Z"
+        case .totalSizeDesc: return "Total Size"
+        case .dataSizeDesc: return "Data Size"
+        case .appSizeDesc: return "App Size"
+        case .sizeAsc: return "Smallest"
+        }
+    }
+}
+
 // MARK: - Backup Mode
 public enum BackupMode: String, Codable, CaseIterable, Identifiable {
     case full = "Full"

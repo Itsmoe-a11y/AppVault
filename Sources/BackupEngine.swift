@@ -45,6 +45,32 @@ public final class BackupEngine {
 
     private static let versionCountersKey = "appvault_backup_version_counters_v1"
     private static let versionLock = NSLock()
+    private static let idleLock = NSLock()
+    private static var idleDisableCount: Int = 0
+
+    public func beginKeepAwake() {
+        Self.idleLock.lock()
+        Self.idleDisableCount += 1
+        let shouldEnable = (Self.idleDisableCount == 1)
+        Self.idleLock.unlock()
+        if shouldEnable {
+            Task { @MainActor in
+                UIApplication.shared.isIdleTimerDisabled = true
+            }
+        }
+    }
+
+    public func endKeepAwake() {
+        Self.idleLock.lock()
+        Self.idleDisableCount = max(0, Self.idleDisableCount - 1)
+        let shouldDisable = (Self.idleDisableCount == 0)
+        Self.idleLock.unlock()
+        if shouldDisable {
+            Task { @MainActor in
+                UIApplication.shared.isIdleTimerDisabled = false
+            }
+        }
+    }
 
     /// Extracts sequential backup version (e.g. `_v2_` or `_v2.adbk`) from an archive filename.
     public static func extractBackupVersion(from filename: String) -> Int? {
@@ -265,8 +291,8 @@ public final class BackupEngine {
         note: String,
         progress: @escaping (OperationProgress) -> Void
     ) async throws -> BackupRecord {
-        await MainActor.run { UIApplication.shared.isIdleTimerDisabled = true }
-        defer { Task { @MainActor in UIApplication.shared.isIdleTimerDisabled = false } }
+        beginKeepAwake()
+        defer { endKeepAwake() }
 
         let password = encryptionPassword?.trimmingCharacters(in: .whitespacesAndNewlines)
         let shouldEncrypt = (password != nil && !(password!.isEmpty))

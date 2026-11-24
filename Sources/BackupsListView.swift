@@ -534,12 +534,12 @@ struct CloudBackupCardView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 12) {
-                Image(systemName: "icloud.fill")
-                    .font(.system(size: 26))
-                    .foregroundColor(.blue)
-                    .frame(width: 40, height: 40)
-                    .background(Color.blue.opacity(0.12))
-                    .cornerRadius(8)
+                AppIconView(
+                    bundleIdentifier: AppIconCache.extractBundleIdentifier(fromArchiveName: file.name),
+                    fallbackSystemName: "icloud.fill",
+                    fallbackColor: .blue,
+                    size: 42
+                )
 
                 VStack(alignment: .leading, spacing: 2) {
                     HStack(spacing: 5) {
@@ -628,12 +628,12 @@ struct WebDAVBackupCardView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 12) {
-                Image(systemName: "server.rack")
-                    .font(.system(size: 24))
-                    .foregroundColor(.purple)
-                    .frame(width: 40, height: 40)
-                    .background(Color.purple.opacity(0.12))
-                    .cornerRadius(8)
+                AppIconView(
+                    bundleIdentifier: AppIconCache.extractBundleIdentifier(fromArchiveName: file.name),
+                    fallbackSystemName: "server.rack",
+                    fallbackColor: .purple,
+                    size: 42
+                )
 
                 VStack(alignment: .leading, spacing: 2) {
                     HStack(spacing: 5) {
@@ -724,12 +724,21 @@ struct BackupCardView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 12) {
-                Image(systemName: record.isEncrypted ? "lock.shield.fill" : (record.mode == .full ? "shippingbox.fill" : "internaldrive.fill"))
-                    .font(.system(size: 26))
-                    .foregroundColor(record.isEncrypted ? .orange : (record.mode == .full ? .purple : .blue))
-                    .frame(width: 40, height: 40)
-                    .background(Color(UIColor.tertiarySystemFill))
-                    .cornerRadius(8)
+                ZStack(alignment: .bottomTrailing) {
+                    AppIconView(
+                        bundleIdentifier: record.bundleIdentifier,
+                        fallbackSystemName: record.mode == .full ? "shippingbox.fill" : "internaldrive.fill",
+                        fallbackColor: record.mode == .full ? .purple : .blue,
+                        size: 42
+                    )
+                    if record.isEncrypted {
+                        Image(systemName: "lock.circle.fill")
+                            .font(.system(size: 14))
+                            .foregroundColor(.orange)
+                            .background(Circle().fill(Color(UIColor.systemBackground)))
+                            .offset(x: 3, y: 3)
+                    }
+                }
 
                 VStack(alignment: .leading, spacing: 2) {
                     HStack(spacing: 5) {
