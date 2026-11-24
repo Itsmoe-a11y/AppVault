@@ -21,6 +21,8 @@ public struct BatchBackupSheet: View {
     @State private var includeCaches: Bool
     @State private var includeKeychain: Bool = true
     @State private var includeAppGroups: Bool = true
+    @State private var compressionLevel: BackupCompressionLevel = SettingsViewModel.savedDefaultCompressionLevel
+    @State private var bufferProfile: UploadBufferProfile = SettingsViewModel.savedUploadBufferProfile
     @State private var enableEncryption: Bool = false
     @State private var encryptionPassword: String = ""
     @State private var isExecuting: Bool = false
@@ -96,7 +98,7 @@ public struct BatchBackupSheet: View {
                                         .frame(width: 24)
                                     Text(dest.title)
                                         .foregroundColor(.primary)
-                                        .font(.body.weight(selectedDestination == dest ? .semibold : .regular))
+                                        .fontWeight(selectedDestination == dest ? .semibold : .regular)
                                     Spacer()
                                     if selectedDestination == dest {
                                         Image(systemName: "checkmark.circle.fill")
@@ -126,6 +128,22 @@ public struct BatchBackupSheet: View {
                             }
                         }
                         .pickerStyle(SegmentedPickerStyle())
+
+                        Picker("Compression", selection: $compressionLevel) {
+                            ForEach(BackupCompressionLevel.allCases) { lvl in
+                                Text(lvl.shortTitle).tag(lvl)
+                            }
+                        }
+                        .pickerStyle(SegmentedPickerStyle())
+
+                        if selectedDestination == .googleDrive {
+                            Picker("RAM Buffer", selection: $bufferProfile) {
+                                ForEach(UploadBufferProfile.allCases) { prof in
+                                    Text(prof.shortTitle).tag(prof)
+                                }
+                            }
+                            .pickerStyle(SegmentedPickerStyle())
+                        }
 
                         Toggle("Include Shared App Groups", isOn: $includeAppGroups)
                         Toggle("Include Keychain & Logins", isOn: $includeKeychain)
@@ -283,6 +301,8 @@ public struct BatchBackupSheet: View {
         let caches = includeCaches
         let keychain = includeKeychain
         let groups = includeAppGroups
+        let selectedCompression = compressionLevel
+        let selectedBuffer = bufferProfile
         let password = enableEncryption ? encryptionPassword : nil
         let retentionLimit = SettingsViewModel.savedMaxBackupsPerApp
 
@@ -312,6 +332,8 @@ public struct BatchBackupSheet: View {
                             includeKeychain: keychain,
                             includeAppGroups: groups,
                             encryptionPassword: password,
+                            compressionLevel: selectedCompression,
+                            bufferProfile: selectedBuffer,
                             note: "Batch Backup"
                         ) { p in
                             Task { @MainActor in
@@ -326,6 +348,7 @@ public struct BatchBackupSheet: View {
                             includeKeychain: keychain,
                             includeAppGroups: groups,
                             encryptionPassword: password,
+                            compressionLevel: selectedCompression,
                             note: "Batch Backup"
                         ) { p in
                             Task { @MainActor in

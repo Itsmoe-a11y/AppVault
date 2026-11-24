@@ -6,6 +6,8 @@ public final class SettingsViewModel: ObservableObject {
     public static let defaultModeKey = "appvault_default_backup_mode"
     public static let defaultCachesKey = "appvault_default_include_caches"
     public static let maxBackupsPerAppKey = "appvault_max_backups_per_app"
+    public static let defaultCompressionKey = "appvault_default_compression_level"
+    public static let uploadBufferProfileKey = "appvault_upload_buffer_profile"
 
     public static var savedDefaultBackupMode: BackupMode {
         if let raw = UserDefaults.standard.string(forKey: defaultModeKey),
@@ -21,6 +23,24 @@ public final class SettingsViewModel: ObservableObject {
 
     public static var savedMaxBackupsPerApp: Int {
         UserDefaults.standard.integer(forKey: maxBackupsPerAppKey)
+    }
+
+    public static var savedDefaultCompressionLevel: BackupCompressionLevel {
+        if UserDefaults.standard.object(forKey: defaultCompressionKey) != nil {
+            let raw = Int32(UserDefaults.standard.integer(forKey: defaultCompressionKey))
+            if let level = BackupCompressionLevel(rawValue: raw) {
+                return level
+            }
+        }
+        return .fast
+    }
+
+    public static var savedUploadBufferProfile: UploadBufferProfile {
+        if let raw = UserDefaults.standard.string(forKey: uploadBufferProfileKey),
+           let profile = UploadBufferProfile(rawValue: raw) {
+            return profile
+        }
+        return .auto
     }
 
     @Published public var defaultBackupMode: BackupMode {
@@ -42,6 +62,18 @@ public final class SettingsViewModel: ObservableObject {
         }
     }
 
+    @Published public var defaultCompressionLevel: BackupCompressionLevel {
+        didSet {
+            UserDefaults.standard.set(Int(defaultCompressionLevel.rawValue), forKey: Self.defaultCompressionKey)
+        }
+    }
+
+    @Published public var uploadBufferProfile: UploadBufferProfile {
+        didSet {
+            UserDefaults.standard.set(uploadBufferProfile.rawValue, forKey: Self.uploadBufferProfileKey)
+        }
+    }
+
     @Published public var freeDiskSpace: String = "Calculating..."
     @Published public var backupStorageUsed: String = "Calculating..."
     @Published public var tempStorageUsed: String = "Calculating..."
@@ -56,6 +88,8 @@ public final class SettingsViewModel: ObservableObject {
         self.defaultBackupMode = Self.savedDefaultBackupMode
         self.defaultIncludeCaches = Self.savedDefaultIncludeCaches
         self.maxBackupsPerApp = Self.savedMaxBackupsPerApp
+        self.defaultCompressionLevel = Self.savedDefaultCompressionLevel
+        self.uploadBufferProfile = Self.savedUploadBufferProfile
         refreshDiagnostics()
     }
 

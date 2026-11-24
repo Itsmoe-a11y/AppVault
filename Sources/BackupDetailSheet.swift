@@ -12,6 +12,8 @@ public struct BackupDetailSheet: View {
     @State private var includeKeychain: Bool = true
     @State private var includeAppGroups: Bool = true
     @State private var includeCaches: Bool
+    @State private var compressionLevel: BackupCompressionLevel
+    @State private var bufferProfile: UploadBufferProfile
     @State private var note: String = ""
     @State private var enableEncryption: Bool = false
     @State private var encryptionPassword: String = ""
@@ -44,6 +46,8 @@ public struct BackupDetailSheet: View {
         _currentApp = State(initialValue: app)
         _selectedMode = State(initialValue: SettingsViewModel.savedDefaultBackupMode)
         _includeCaches = State(initialValue: SettingsViewModel.savedDefaultIncludeCaches)
+        _compressionLevel = State(initialValue: SettingsViewModel.savedDefaultCompressionLevel)
+        _bufferProfile = State(initialValue: SettingsViewModel.savedUploadBufferProfile)
 
         // Restore last chosen destination, or auto-select Google Drive when authenticated & local iPhone space is tight
         let savedRaw = UserDefaults.standard.string(forKey: "appvault_last_backup_destination")
@@ -309,6 +313,83 @@ public struct BackupDetailSheet: View {
                                 .padding(.vertical, 4)
                             }
                         }
+
+                        // Live sequential versioned filename preview (v1, v2, v3...)
+                        let remoteNames: [String] = (selectedDestination == .googleDrive)
+                            ? backupsVM.cloudBackups.map(\.name)
+                            : ((selectedDestination == .webdav) ? backupsVM.webdavBackups.map(\.name) : [])
+                        let nextFileName = BackupEngine.shared.previewNextArchiveName(
+                            for: currentApp,
+                            destination: selectedDestination,
+                            isEncrypted: enableEncryption,
+                            cachedRemoteNames: remoteNames
+                        )
+                        HStack(spacing: 6) {
+                            Image(systemName: "tag.fill")
+                                .font(.caption2)
+                                .foregroundColor(.secondary)
+                            Text(nextFileName)
+                                .font(.system(size: 11, design: .monospaced))
+                                .foregroundColor(.secondary)
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                        }
+                        .padding(.top, 2)
+                    }
+
+                    // Section 4.5: Speed, Compression & Dynamic RAM Buffer
+                    Section(header: Text("Speed & Compression")) {
+                        VStack(alignment: .leading, spacing: 6) {
+                            HStack {
+                                Text("Compression")
+                                    .font(.subheadline)
+                                Spacer()
+                                Text(compressionLevel.title)
+                                    .font(.caption.bold())
+                                    .foregroundColor(.blue)
+                            }
+                            Picker("Compression", selection: $compressionLevel) {
+                                ForEach(BackupCompressionLevel.allCases) { lvl in
+                                    Text(lvl.shortTitle).tag(lvl)
+                                }
+                            }
+                            .pickerStyle(SegmentedPickerStyle())
+                            .onChange(of: compressionLevel) { newVal in
+                                UserDefaults.standard.set(Int(newVal.rawValue), forKey: SettingsViewModel.defaultCompressionKey)
+                            }
+                            Text(compressionLevel.subtitle)
+                                .font(.caption2)
+                                .foregroundColor(.secondary)
+                        }
+                        .padding(.vertical, 2)
+
+                        if selectedDestination == .googleDrive {
+                            VStack(alignment: .leading, spacing: 6) {
+                                HStack {
+                                    Text("RAM Upload Buffer")
+                                        .font(.subheadline)
+                                    Spacer()
+                                    let resolvedMB = bufferProfile.resolvedChunkSizeBytes() / 1_048_576
+                                    Text("\(resolvedMB) MB chunks")
+                                        .font(.caption.bold())
+                                        .foregroundColor(.green)
+                                }
+                                Picker("RAM Upload Buffer", selection: $bufferProfile) {
+                                    ForEach(UploadBufferProfile.allCases) { prof in
+                                        Text(prof.shortTitle).tag(prof)
+                                    }
+                                }
+                                .pickerStyle(SegmentedPickerStyle())
+                                .onChange(of: bufferProfile) { newProf in
+                                    UserDefaults.standard.set(newProf.rawValue, forKey: SettingsViewModel.uploadBufferProfileKey)
+                                }
+                                let headroomStr = ByteCountFormatter.string(fromByteCount: UploadBufferProfile.availableRAMHeadroomBytes(), countStyle: .memory)
+                                Text("Dynamic RAM headroom: \(headroomStr). Double-buffered parallel compress + upload automatically scales down if iOS memory tightens.")
+                                    .font(.caption2)
+                                    .foregroundColor(.secondary)
+                            }
+                            .padding(.vertical, 2)
+                        }
                     }
 
                     // Section 5: Granular Components & Options
@@ -522,6 +603,8 @@ public struct BackupDetailSheet: View {
         let caches = includeCaches
         let keychain = includeKeychain
         let groups = includeAppGroups
+        let selectedCompression = compressionLevel
+        let selectedBuffer = bufferProfile
         let backupNote = note
         let password = enableEncryption ? encryptionPassword : nil
         let retentionLimit = SettingsViewModel.savedMaxBackupsPerApp
@@ -548,6 +631,8 @@ public struct BackupDetailSheet: View {
                         includeKeychain: keychain,
                         includeAppGroups: groups,
                         encryptionPassword: password,
+                        compressionLevel: selectedCompression,
+                        bufferProfile: selectedBuffer,
                         note: backupNote
                     ) { progress in
                         Task { @MainActor in
@@ -568,6 +653,7 @@ public struct BackupDetailSheet: View {
                         includeKeychain: keychain,
                         includeAppGroups: groups,
                         encryptionPassword: password,
+                        compressionLevel: selectedCompression,
                         note: backupNote
                     ) { progress in
                         Task { @MainActor in
@@ -588,6 +674,7 @@ public struct BackupDetailSheet: View {
                         includeKeychain: keychain,
                         includeAppGroups: groups,
                         encryptionPassword: password,
+                        compressionLevel: selectedCompression,
                         note: backupNote
                     ) { progress in
                         Task { @MainActor in

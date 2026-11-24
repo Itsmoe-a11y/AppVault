@@ -43,13 +43,93 @@ public final class BackupEngine {
         chmod(dir.path, 0o755)
     }
 
-    private func makeArchiveName(for app: InstalledApp, isEncrypted: Bool) -> String {
+    private static let versionCountersKey = "appvault_backup_version_counters_v1"
+    private static let versionLock = NSLock()
+
+    /// Extracts sequential backup version (e.g. `_v2_` or `_v2.adbk`) from an archive filename.
+    public static func extractBackupVersion(from filename: String) -> Int? {
+        let pattern = "_v([0-9]+)(?:_|\\.)"
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else { return nil }
+        let ns = filename as NSString
+        let range = NSRange(location: 0, length: ns.length)
+        guard let match = regex.firstMatch(in: filename, options: [], range: range),
+              match.numberOfRanges >= 2 else {
+            return nil
+        }
+        return Int(ns.substring(with: match.range(at: 1)))
+    }
+
+    private func savedVersionCounter(for bundleIdentifier: String, destination: BackupDestination) -> Int {
+        Self.versionLock.lock()
+        defer { Self.versionLock.unlock() }
+        let map = UserDefaults.standard.dictionary(forKey: Self.versionCountersKey) as? [String: Int] ?? [:]
+        return map["\(destination.rawValue)::\(bundleIdentifier)"] ?? 0
+    }
+
+    private func recordBackupVersion(_ version: Int, for bundleIdentifier: String, destination: BackupDestination) {
+        Self.versionLock.lock()
+        defer { Self.versionLock.unlock() }
+        var map = UserDefaults.standard.dictionary(forKey: Self.versionCountersKey) as? [String: Int] ?? [:]
+        let key = "\(destination.rawValue)::\(bundleIdentifier)"
+        map[key] = max(map[key] ?? 0, version)
+        UserDefaults.standard.set(map, forKey: Self.versionCountersKey)
+    }
+
+    /// Computes the next sequential backup version (v1, v2, v3...) by inspecting existing archives
+    /// at the destination plus the persistent counter (handles legacy timestamped archives seamlessly).
+    public func nextBackupVersion(
+        for bundleIdentifier: String,
+        destination: BackupDestination,
+        existingFileNames: [String]
+    ) -> Int {
+        let saved = savedVersionCounter(for: bundleIdentifier, destination: destination)
+        let needle = bundleIdentifier.lowercased()
+        var maxFound = 0
+        var matchCount = 0
+
+        for name in existingFileNames {
+            let lower = name.lowercased()
+            guard lower.hasSuffix(".adbk") || lower.hasSuffix(".zip") else { continue }
+            if lower.contains(needle) {
+                matchCount += 1
+                if let v = Self.extractBackupVersion(from: name) {
+                    maxFound = max(maxFound, v)
+                }
+            }
+        }
+        return max(saved, max(maxFound, matchCount)) + 1
+    }
+
+    private func localArchiveFileNames() -> [String] {
+        (try? fileManager.contentsOfDirectory(atPath: backupsDirectory.path)) ?? []
+    }
+
+    private static let archiveDateFormatter: DateFormatter = {
+        let df = DateFormatter()
+        df.locale = Locale(identifier: "en_US_POSIX")
+        df.dateFormat = "yyyy-MM-dd"
+        return df
+    }()
+
+    public func makeArchiveName(for app: InstalledApp, version: Int, isEncrypted: Bool) -> String {
         let safeName = app.name.components(separatedBy: CharacterSet.alphanumerics.inverted).joined()
         let prefix = safeName.isEmpty ? "App" : safeName
-        let timestamp = Int(Date().timeIntervalSince1970)
+        let dateStamp = Self.archiveDateFormatter.string(from: Date())
+        let ver = max(1, version)
         return isEncrypted
-            ? "\(prefix)_\(app.bundleIdentifier)_\(timestamp).enc.adbk"
-            : "\(prefix)_\(app.bundleIdentifier)_\(timestamp).adbk"
+            ? "\(prefix)_\(app.bundleIdentifier)_v\(ver)_\(dateStamp).enc.adbk"
+            : "\(prefix)_\(app.bundleIdentifier)_v\(ver)_\(dateStamp).adbk"
+    }
+
+    public func previewNextArchiveName(
+        for app: InstalledApp,
+        destination: BackupDestination,
+        isEncrypted: Bool,
+        cachedRemoteNames: [String] = []
+    ) -> String {
+        let names = (destination == .local) ? localArchiveFileNames() : cachedRemoteNames
+        let nextVer = nextBackupVersion(for: app.bundleIdentifier, destination: destination, existingFileNames: names)
+        return makeArchiveName(for: app, version: nextVer, isEncrypted: isEncrypted)
     }
 
     // MARK: - 1. Zero-Staging Streaming Backup (Direct to Local File, Optional AES-256-GCM Encryption)
@@ -60,12 +140,19 @@ public final class BackupEngine {
         includeKeychain: Bool = true,
         includeAppGroups: Bool = true,
         encryptionPassword: String? = nil,
+        compressionLevel: BackupCompressionLevel = .fast,
         note: String,
         progress: @escaping (OperationProgress) -> Void
     ) async throws -> BackupRecord {
         let password = encryptionPassword?.trimmingCharacters(in: .whitespacesAndNewlines)
         let shouldEncrypt = (password != nil && !(password!.isEmpty))
-        let archiveName = makeArchiveName(for: app, isEncrypted: shouldEncrypt)
+        let existingLocal = localArchiveFileNames()
+        var version = nextBackupVersion(for: app.bundleIdentifier, destination: .local, existingFileNames: existingLocal)
+        var archiveName = makeArchiveName(for: app, version: version, isEncrypted: shouldEncrypt)
+        while fileManager.fileExists(atPath: backupsDirectory.appendingPathComponent(archiveName).path) {
+            version += 1
+            archiveName = makeArchiveName(for: app, version: version, isEncrypted: shouldEncrypt)
+        }
         let destinationURL = backupsDirectory.appendingPathComponent(archiveName)
 
         // When encrypting, stream tar.gz to a temp file then stream-encrypt to final destination (zero OOM)
@@ -104,6 +191,7 @@ public final class BackupEngine {
             includeCaches: includeCaches,
             includeKeychain: includeKeychain,
             includeAppGroups: includeAppGroups,
+            compressionLevel: compressionLevel,
             note: note,
             onProgress: { p in
                 let scaled = shouldEncrypt ? min(0.85, p.fractionCompleted * 0.85) : p.fractionCompleted
@@ -142,6 +230,7 @@ public final class BackupEngine {
         }
 
         isSuccess = true
+        recordBackupVersion(version, for: app.bundleIdentifier, destination: .local)
         PosixHelper.shared.fixPermissions(at: destinationURL.path)
         record.archiveFileName = archiveName
         record.fileSizeBytes = totalWritten
@@ -171,6 +260,8 @@ public final class BackupEngine {
         includeKeychain: Bool = true,
         includeAppGroups: Bool = true,
         encryptionPassword: String? = nil,
+        compressionLevel: BackupCompressionLevel = .fast,
+        bufferProfile: UploadBufferProfile = .auto,
         note: String,
         progress: @escaping (OperationProgress) -> Void
     ) async throws -> BackupRecord {
@@ -179,9 +270,13 @@ public final class BackupEngine {
 
         let password = encryptionPassword?.trimmingCharacters(in: .whitespacesAndNewlines)
         let shouldEncrypt = (password != nil && !(password!.isEmpty))
-        let archiveName = makeArchiveName(for: app, isEncrypted: shouldEncrypt)
+        let existingDriveNames = (try? await GoogleDriveService.shared.fetchCloudBackups())?.map(\.name) ?? []
+        let backupVersion = nextBackupVersion(for: app.bundleIdentifier, destination: .googleDrive, existingFileNames: existingDriveNames)
+        let archiveName = makeArchiveName(for: app, version: backupVersion, isEncrypted: shouldEncrypt)
+        let initialHeadroomMB = UploadBufferProfile.availableRAMHeadroomBytes() / 1_048_576
+        var activeChunkSize = bufferProfile.resolvedChunkSizeBytes()
 
-        DebugLogger.shared.log("Backup", "Starting Google Drive stream for \(app.name) (\(app.bundleIdentifier), mode=\(mode.rawValue), encrypted=\(shouldEncrypt))")
+        DebugLogger.shared.log("Backup", "Starting Google Drive stream for \(app.name) (mode=\(mode.rawValue), encrypted=\(shouldEncrypt), compression=\(compressionLevel.shortTitle), buffer=\(bufferProfile.rawValue) [\(activeChunkSize / 1_048_576) MB chunks], RAM headroom=\(initialHeadroomMB) MB)")
         progress(OperationProgress(
             stage: "Connecting to Google Drive",
             fractionCompleted: 0.03,
@@ -202,51 +297,93 @@ public final class BackupEngine {
 
         try Task.checkCancellation()
 
-        // Google Drive REQUIRES non-final chunks to be an exact multiple of 256 KB (262,144 bytes).
-        // 5 MB = 20 * 262,144 bytes = 5,242,880 bytes.
-        let alignedChunkSize: Int = 20 * 262_144
-        var chunkBuffer = Data()
-        var currentOffset: Int64 = 0
+        // Double-buffered dynamic-RAM pipeline:
+        // - Re-evaluates os_proc_available_memory() between chunks so Google Drive chunk size scales up to 64-128 MB when RAM is plentiful and steps down automatically under pressure.
+        // - Overlaps Wi-Fi upload of chunk N with disk read + compression of chunk N+1 in parallel.
+        final class LockedInt64: @unchecked Sendable {
+            private let lock = NSLock()
+            private var value: Int64 = 0
+            func get() -> Int64 { lock.lock(); defer { lock.unlock() }; return value }
+            func set(_ newValue: Int64) { lock.lock(); value = newValue; lock.unlock() }
+        }
+
+        var chunkBuffer = Data(capacity: activeChunkSize + 524_288)
+        var dispatchedOffset: Int64 = 0
+        let confirmedUploaded = LockedInt64()
         var lastStreamFraction: Double = 0.12
-        let uploadStart = Date()
+        var uploadStart: Date? = nil
+        var pendingUploadTask: Task<Void, Error>? = nil
+
+        defer {
+            pendingUploadTask?.cancel()
+        }
 
         func formatSpeed() -> String {
-            let elapsed = max(0.25, Date().timeIntervalSince(uploadStart))
-            let mbps = (Double(currentOffset) / 1_048_576.0) / elapsed
+            let done = confirmedUploaded.get()
+            guard let start = uploadStart, done > 0 else { return "starting..." }
+            let elapsed = max(0.25, Date().timeIntervalSince(start))
+            let mbps = (Double(done) / 1_048_576.0) / elapsed
             return String(format: "%.1f MB/s", mbps)
         }
 
         func flushAlignedChunks() async throws {
-            while chunkBuffer.count >= alignedChunkSize {
+            while chunkBuffer.count >= activeChunkSize {
                 try Task.checkCancellation()
-                let toUpload = Data(chunkBuffer.prefix(alignedChunkSize))
-                // Compact backing allocation immediately so Swift Data slices never grow across 40GB+ streams
-                if chunkBuffer.count == alignedChunkSize {
-                    chunkBuffer = Data()
+                let sendSize = activeChunkSize
+                let toUpload = Data(chunkBuffer.prefix(sendSize))
+                // Compact tail immediately so Swift Data slices never grow across 40GB+ streams
+                if chunkBuffer.count == sendSize {
+                    chunkBuffer = Data(capacity: sendSize + 524_288)
                 } else {
-                    chunkBuffer = Data(chunkBuffer.dropFirst(alignedChunkSize))
+                    chunkBuffer = Data(chunkBuffer.dropFirst(sendSize))
                 }
 
-                _ = try await GoogleDriveService.shared.uploadChunk(
-                    sessionURL: sessionURL,
-                    chunkData: toUpload,
-                    startOffset: currentOffset,
-                    isFinal: false,
-                    totalFileSize: nil
-                )
-                currentOffset += Int64(toUpload.count)
-                let uploadedLabel: String = autoreleasepool {
-                    ByteCountFormatter.string(fromByteCount: currentOffset, countStyle: .file)
+                // Wait ONLY if the previous background upload is still finishing on Wi-Fi
+                if let inFlight = pendingUploadTask {
+                    try await inFlight.value
+                    pendingUploadTask = nil
                 }
-                progress(OperationProgress(
-                    stage: shouldEncrypt ? "Encrypting & Uploading" : "Cloud Streaming",
-                    fractionCompleted: min(0.94, max(0.12, lastStreamFraction)),
-                    statusDetail: "Uploaded \(uploadedLabel) (\(formatSpeed())) • 0 MB local disk used"
-                ))
+
+                if uploadStart == nil {
+                    uploadStart = Date()
+                }
+
+                let chunkOffset = dispatchedOffset
+                dispatchedOffset += Int64(toUpload.count)
+                let chunkMB = toUpload.count / 1_048_576
+                let currentFraction = lastStreamFraction
+
+                // Dispatch upload on background Task so disk read + compression immediately fills the next chunk in parallel!
+                pendingUploadTask = Task(priority: .userInitiated) {
+                    _ = try await GoogleDriveService.shared.uploadChunk(
+                        sessionURL: sessionURL,
+                        chunkData: toUpload,
+                        startOffset: chunkOffset,
+                        isFinal: false,
+                        totalFileSize: nil
+                    )
+                    let totalDone = chunkOffset + Int64(toUpload.count)
+                    confirmedUploaded.set(totalDone)
+                    let uploadedLabel: String = autoreleasepool {
+                        ByteCountFormatter.string(fromByteCount: totalDone, countStyle: .file)
+                    }
+                    progress(OperationProgress(
+                        stage: shouldEncrypt ? "Encrypting & Uploading" : "Cloud Streaming",
+                        fractionCompleted: min(0.94, max(0.12, currentFraction)),
+                        statusDetail: "Uploaded \(uploadedLabel) (\(formatSpeed())) • \(chunkMB) MB chunks • \(compressionLevel.shortTitle) • 0 MB disk"
+                    ))
+                }
+
+                // Dynamically re-tune next chunk size based on live os_proc_available_memory() headroom
+                let nextSize = bufferProfile.resolvedChunkSizeBytes()
+                if nextSize != activeChunkSize {
+                    DebugLogger.shared.log("Backup", "Dynamic RAM tuner adjusted chunk size: \(activeChunkSize / 1_048_576) MB -> \(nextSize / 1_048_576) MB (headroom=\(UploadBufferProfile.availableRAMHeadroomBytes() / 1_048_576) MB)")
+                    activeChunkSize = nextSize
+                }
             }
         }
 
-        // Optional 0-disk in-RAM chunked AES-256-GCM encryptor piped straight into the 5 MB Drive buffer
+        // Optional 0-disk in-RAM chunked AES-256-GCM encryptor piped straight into the dynamic Drive buffer
         var streamEncryptor: StreamingAEADEncryptor? = nil
         if shouldEncrypt, let pwd = password {
             streamEncryptor = try StreamingAEADEncryptor(password: pwd) { encryptedFrame in
@@ -267,15 +404,17 @@ public final class BackupEngine {
             includeCaches: includeCaches,
             includeKeychain: includeKeychain,
             includeAppGroups: includeAppGroups,
+            compressionLevel: compressionLevel,
             note: note,
             onProgress: { p in
                 lastStreamFraction = min(0.94, max(0.12, 0.12 + p.fractionCompleted * 0.82))
+                let currentConfirmed = confirmedUploaded.get()
                 let uploadedStr: String = autoreleasepool {
-                    ByteCountFormatter.string(fromByteCount: currentOffset, countStyle: .file)
+                    ByteCountFormatter.string(fromByteCount: currentConfirmed, countStyle: .file)
                 }
-                let detail = currentOffset > 0
-                    ? "\(p.statusDetail) • \(uploadedStr) uploaded (\(formatSpeed()))"
-                    : p.statusDetail
+                let detail = currentConfirmed > 0
+                    ? "\(p.statusDetail) • \(uploadedStr) uploaded (\(formatSpeed())) • \(activeChunkSize / 1_048_576) MB buf"
+                    : "\(p.statusDetail) • Filling first \(activeChunkSize / 1_048_576) MB buffer..."
                 progress(OperationProgress(
                     stage: shouldEncrypt ? "Encrypting & Streaming" : "Cloud Streaming",
                     fractionCompleted: lastStreamFraction,
@@ -296,17 +435,23 @@ public final class BackupEngine {
             try await encryptor.finish()
         }
 
+        // Wait for the final in-flight background chunk before closing the resumable upload session
+        if let inFlight = pendingUploadTask {
+            try await inFlight.value
+            pendingUploadTask = nil
+        }
+
         progress(OperationProgress(
             stage: "Finishing Upload",
             fractionCompleted: 0.95,
             statusDetail: "Finalizing Google Drive archive..."
         ))
 
-        let finalTotalSize = currentOffset + Int64(chunkBuffer.count)
+        let finalTotalSize = dispatchedOffset + Int64(chunkBuffer.count)
         _ = try await GoogleDriveService.shared.uploadChunk(
             sessionURL: sessionURL,
             chunkData: chunkBuffer,
-            startOffset: currentOffset,
+            startOffset: dispatchedOffset,
             isFinal: true,
             totalFileSize: finalTotalSize
         )
@@ -314,6 +459,7 @@ public final class BackupEngine {
         record.archiveFileName = archiveName
         record.fileSizeBytes = finalTotalSize
         record.isEncrypted = shouldEncrypt
+        recordBackupVersion(backupVersion, for: app.bundleIdentifier, destination: .googleDrive)
 
         let folderLabel = await MainActor.run { GoogleDriveService.shared.targetFolderName }
         DebugLogger.shared.log("Backup", "Google Drive upload completed: \(archiveName) (\(record.formattedSize))", level: .success)
@@ -335,12 +481,15 @@ public final class BackupEngine {
         includeKeychain: Bool = true,
         includeAppGroups: Bool = true,
         encryptionPassword: String? = nil,
+        compressionLevel: BackupCompressionLevel = .fast,
         note: String,
         progress: @escaping (OperationProgress) -> Void
     ) async throws -> BackupRecord {
         let password = encryptionPassword?.trimmingCharacters(in: .whitespacesAndNewlines)
         let shouldEncrypt = (password != nil && !(password!.isEmpty))
-        let archiveName = makeArchiveName(for: app, isEncrypted: shouldEncrypt)
+        let existingWebDAVNames = (try? await WebDAVService.shared.fetchRemoteFiles())?.map(\.name) ?? []
+        let backupVersion = nextBackupVersion(for: app.bundleIdentifier, destination: .webdav, existingFileNames: existingWebDAVNames)
+        let archiveName = makeArchiveName(for: app, version: backupVersion, isEncrypted: shouldEncrypt)
 
         let tempPlain = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("AppVault_WDPlain_\(UUID().uuidString).adbk")
         let tempUpload = shouldEncrypt
@@ -365,6 +514,7 @@ public final class BackupEngine {
             includeCaches: includeCaches,
             includeKeychain: includeKeychain,
             includeAppGroups: includeAppGroups,
+            compressionLevel: compressionLevel,
             note: note,
             onProgress: { p in
                 progress(OperationProgress(
@@ -401,6 +551,7 @@ public final class BackupEngine {
         record.archiveFileName = archiveName
         record.fileSizeBytes = totalWritten
         record.isEncrypted = shouldEncrypt
+        recordBackupVersion(backupVersion, for: app.bundleIdentifier, destination: .webdav)
 
         progress(OperationProgress(
             stage: "WebDAV Upload Complete",

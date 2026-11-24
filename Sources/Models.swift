@@ -1,6 +1,8 @@
 import Foundation
 import UIKit
 import Darwin
+import os
+import os.proc
 
 // MARK: - Thread-Safe Device Info Snapshot (Avoids @MainActor UIDevice calls on background threads)
 public enum DeviceInfoSnapshot {
@@ -65,6 +67,121 @@ public enum BackupDestination: String, Codable, CaseIterable, Identifiable {
         case .googleDrive: return "icloud.and.arrow.up"
         case .webdav: return "server.rack"
         }
+    }
+}
+
+// MARK: - Compression Level (Store Mode + Zlib Levels 1, 6, 9 — Always 100% Standard .adbk Gzip Stream)
+public enum BackupCompressionLevel: Int32, Codable, CaseIterable, Identifiable {
+    case store = 0
+    case fast = 1
+    case balanced = 6
+    case maximum = 9
+
+    public var id: Int32 { rawValue }
+
+    public var shortTitle: String {
+        switch self {
+        case .store: return "Store"
+        case .fast: return "Fast"
+        case .balanced: return "Normal"
+        case .maximum: return "Max"
+        }
+    }
+
+    public var title: String {
+        switch self {
+        case .store: return "Store (0 — Fastest)"
+        case .fast: return "Fast (Level 1)"
+        case .balanced: return "Balanced (Level 6)"
+        case .maximum: return "Maximum (Level 9)"
+        }
+    }
+
+    public var subtitle: String {
+        switch self {
+        case .store: return "Zero compression, max speed & lowest heat. Best for WhatsApp, photos, and videos."
+        case .fast: return "Light compression (4-8x faster than Normal). Shrinks databases while flying past media."
+        case .balanced: return "Standard gzip compression. Good size/speed tradeoff for mixed app data."
+        case .maximum: return "Smallest file size, highest CPU usage. Best for large text or SQLite databases."
+        }
+    }
+
+    public var zlibLevel: Int32 { rawValue }
+}
+
+// MARK: - Dynamic RAM-Aware Google Drive Upload Buffer Profile
+public enum UploadBufferProfile: String, Codable, CaseIterable, Identifiable {
+    case auto = "Auto"
+    case conservative = "Conservative"
+    case fast = "Fast"
+    case turbo = "Turbo"
+    case maxRAM = "MaxRAM"
+
+    public var id: String { rawValue }
+
+    public var shortTitle: String {
+        switch self {
+        case .auto: return "Auto"
+        case .conservative: return "8 MB"
+        case .fast: return "32 MB"
+        case .turbo: return "64 MB"
+        case .maxRAM: return "128 MB"
+        }
+    }
+
+    public var title: String {
+        switch self {
+        case .auto: return "Auto (Dynamic RAM)"
+        case .conservative: return "Low RAM (8 MB chunks)"
+        case .fast: return "Fast (32 MB chunks)"
+        case .turbo: return "Turbo (64 MB chunks)"
+        case .maxRAM: return "Max RAM (128 MB chunks)"
+        }
+    }
+
+    /// Live remaining Jetsam memory headroom for this process (bytes) via Apple os_proc_available_memory().
+    public static func availableRAMHeadroomBytes() -> Int64 {
+        return Int64(os_proc_available_memory())
+    }
+
+    /// Computes an exact 256 KB-aligned chunk size for Google Drive resumable upload,
+    /// dynamically clamped against live os_proc_available_memory() so double-buffering never triggers Jetsam OOM.
+    public func resolvedChunkSizeBytes() -> Int {
+        let unit = 262_144 // 256 KB (Google Drive strict alignment unit)
+        let minChunk = 16 * unit // 4 MB floor
+        let headroom = Self.availableRAMHeadroomBytes()
+        let headroomMB = headroom / 1_048_576
+
+        let desiredBytes: Int
+        switch self {
+        case .auto:
+            if headroomMB >= 1400 {
+                desiredBytes = 256 * unit // 64 MB
+            } else if headroomMB >= 700 {
+                desiredBytes = 128 * unit // 32 MB
+            } else if headroomMB >= 350 {
+                desiredBytes = 64 * unit  // 16 MB
+            } else {
+                desiredBytes = 32 * unit  // 8 MB
+            }
+        case .conservative:
+            desiredBytes = 32 * unit      // 8 MB
+        case .fast:
+            desiredBytes = 128 * unit     // 32 MB
+        case .turbo:
+            desiredBytes = 256 * unit     // 64 MB
+        case .maxRAM:
+            desiredBytes = 512 * unit     // 128 MB
+        }
+
+        // Hard safety guard: keep single chunk <= 1/6 of remaining Jetsam headroom (2x double-buffered <= 33%)
+        if headroom > 0 {
+            let safeMax = Int(headroom / 6)
+            let clamped = min(desiredBytes, max(minChunk, safeMax))
+            let aligned = max(minChunk, (clamped / unit) * unit)
+            return aligned
+        }
+        return max(minChunk, (desiredBytes / unit) * unit)
     }
 }
 

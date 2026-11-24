@@ -426,7 +426,7 @@ public final class StreamingAEADEncryptor {
         // Always retain at least 1 byte in buffer until finish() so we know which chunk is final
         while buffer.count > chunkSize {
             let slice = Data(buffer.prefix(chunkSize))
-            buffer.removeFirst(chunkSize)
+            buffer = Data(buffer.dropFirst(chunkSize))
             try await sealAndEmit(plainChunk: slice, isFinal: false)
         }
     }
@@ -436,7 +436,7 @@ public final class StreamingAEADEncryptor {
         // Flush remaining buffered bytes as final chunk(s)
         while buffer.count > chunkSize {
             let slice = Data(buffer.prefix(chunkSize))
-            buffer.removeFirst(chunkSize)
+            buffer = Data(buffer.dropFirst(chunkSize))
             try await sealAndEmit(plainChunk: slice, isFinal: false)
         }
         let finalSlice = buffer

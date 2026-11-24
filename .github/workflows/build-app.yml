@@ -108,6 +108,12 @@ jobs:
                - Staged APFS hardlinks with safe POSIX permissions preventing white-screen/XPC crashes when sharing backups.
             7. ⚡ **Thread Pool Concurrency Optimization**:
                - Offloaded synchronous POSIX directory sizing to a dedicated utility GCD queue, preventing Swift cooperative pool starvation during background streaming.
+            8. 🏷️ **Sequential Versioned Backup Naming**:
+               - Automatic sequential versioning (`_v1_`, `_v2_`, `_v3_...`) with ISO date stamps, live name preview, and version pill badges across all backup views.
+            9. 🎛️ **Multi-Tier Compression Control**:
+               - Selectable compression levels (Store / Fast Level 1 / Balanced Level 6 / Max Level 9) with 256 KB zlib buffer and 4x fewer syscalls.
+            10. 🚀 **Dynamic RAM Headroom Upload Buffer & Double-Buffering**:
+               - Parallel overlapped upload tasks (uploads chunk N over Wi-Fi while reading/compressing chunk N+1 in RAM) with live `os_proc_available_memory()` RAM headroom scaling (up to 128 MB chunks).
 
             ### Installation:
             - **TrollStore**: Download `AppVault.tipa` (or `AppVault.ipa`) and open in TrollStore.

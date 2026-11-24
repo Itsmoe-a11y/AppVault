@@ -150,11 +150,11 @@ struct TarHeader {
 final class GzipStreamWriter {
     private let streamPtr: UnsafeMutablePointer<z_stream>
     private let outBufferPtr: UnsafeMutablePointer<UInt8>
-    private let outBufferSize: Int = 65536
+    private let outBufferSize: Int = 262_144 // 256 KB output buffer (4x fewer deflate iterations)
     private var isOpen = false
     private let onChunk: (Data) async throws -> Void
 
-    init(onChunk: @escaping (Data) async throws -> Void) throws {
+    init(compressionLevel: Int32 = Z_BEST_SPEED, onChunk: @escaping (Data) async throws -> Void) throws {
         self.onChunk = onChunk
         streamPtr = UnsafeMutablePointer<z_stream>.allocate(capacity: 1)
         streamPtr.initialize(to: z_stream())
@@ -164,7 +164,7 @@ final class GzipStreamWriter {
 
         outBufferPtr = UnsafeMutablePointer<UInt8>.allocate(capacity: outBufferSize)
 
-        let ret = deflateInit2_(streamPtr, Z_DEFAULT_COMPRESSION, Z_DEFLATED, 15 + 16, 8, Z_DEFAULT_STRATEGY, ZLIB_VERSION, Int32(MemoryLayout<z_stream>.size))
+        let ret = deflateInit2_(streamPtr, compressionLevel, Z_DEFLATED, 15 + 16, 8, Z_DEFAULT_STRATEGY, ZLIB_VERSION, Int32(MemoryLayout<z_stream>.size))
         guard ret == Z_OK else {
             streamPtr.deinitialize(count: 1)
             streamPtr.deallocate()
@@ -793,6 +793,7 @@ public final class StreamingArchiveEngine {
         includeCaches: Bool = false,
         includeKeychain: Bool = true,
         includeAppGroups: Bool = true,
+        compressionLevel: BackupCompressionLevel = .fast,
         note: String = "",
         onProgress: @escaping (OperationProgress) -> Void,
         onCompressedChunk: @escaping (Data) async throws -> Void
@@ -869,7 +870,7 @@ public final class StreamingArchiveEngine {
         let metaData = try encoder.encode(record)
 
         // 3. Initialize Gzip Stream Writer
-        let gzip = try GzipStreamWriter(onChunk: onCompressedChunk)
+        let gzip = try GzipStreamWriter(compressionLevel: compressionLevel.zlibLevel, onChunk: onCompressedChunk)
 
         // Write Metadata file into root of tar stream
         try await writeTarItem(path: "BackupMetadata.plist", size: Int64(metaData.count), typeflag: "0", mode: 0o644, to: gzip)
@@ -895,7 +896,7 @@ public final class StreamingArchiveEngine {
         // 4. Stream Source Files with Constant RAM (Pure POSIX open/F_NOCACHE/read into 1 reused 64 KB buffer)
         // Eliminates Objective-C NSFileHandle/NSData autorelease leaks that previously caused iOS Jetsam OOM kills at ~2.4 GB!
         var bytesProcessed: Int64 = 0
-        let bufferSize = 65536 // 64 KB reusable raw buffer
+        let bufferSize = 262_144 // 256 KB reusable raw buffer (4x fewer read() syscalls)
         let readBuf = UnsafeMutablePointer<UInt8>.allocate(capacity: bufferSize)
         let zeroBuf = UnsafeMutablePointer<UInt8>.allocate(capacity: bufferSize)
         memset(zeroBuf, 0, bufferSize)

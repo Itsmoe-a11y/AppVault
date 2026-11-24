@@ -254,7 +254,8 @@ public struct SettingsView: View {
                                             Image(systemName: "hand.raised.fill")
                                             Text("Private Sheet")
                                         }
-                                        .font(.caption.weight(.semibold))
+                                        .font(.caption)
+                                        .fontWeight(.semibold)
                                         .foregroundColor(.blue)
                                         .frame(maxWidth: .infinity)
                                         .padding(.vertical, 8)
@@ -270,7 +271,8 @@ public struct SettingsView: View {
                                             Image(systemName: "safari")
                                             Text("External Browser")
                                         }
-                                        .font(.caption.weight(.semibold))
+                                        .font(.caption)
+                                        .fontWeight(.semibold)
                                         .foregroundColor(.blue)
                                         .frame(maxWidth: .infinity)
                                         .padding(.vertical, 8)
@@ -343,7 +345,8 @@ public struct SettingsView: View {
                                             )
                                         }
                                         .buttonStyle(BorderlessButtonStyle())
-                                        .font(.caption.weight(.semibold))
+                                        .font(.caption)
+                                        .fontWeight(.semibold)
                                         .foregroundColor(.white)
                                         .frame(maxWidth: .infinity)
                                         .padding(.vertical, 8)
@@ -516,7 +519,8 @@ public struct SettingsView: View {
                                             _ = rclone.importGoogleDriveTokens(from: remote)
                                         }) {
                                             Text("Connect Google Drive")
-                                                .font(.caption.weight(.semibold))
+                                                .font(.caption)
+                                                .fontWeight(.semibold)
                                                 .foregroundColor(.white)
                                                 .padding(.horizontal, 10)
                                                 .padding(.vertical, 6)
@@ -679,13 +683,51 @@ public struct SettingsView: View {
                     }
                 }
 
-                // Section 5: Backup Defaults & Retention
-                Section(header: Text("Backup Defaults & Retention")) {
+                // Section 5: Backup Defaults, Compression & Dynamic RAM Performance
+                Section(header: Text("Backup Defaults & Performance")) {
                     Picker("Default Backup Mode", selection: $settingsVM.defaultBackupMode) {
                         ForEach(BackupMode.allCases) { mode in
                             Text(mode.title).tag(mode)
                         }
                     }
+
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("Default Compression Level")
+                            .font(.subheadline)
+                        Picker("Compression", selection: $settingsVM.defaultCompressionLevel) {
+                            ForEach(BackupCompressionLevel.allCases) { lvl in
+                                Text(lvl.shortTitle).tag(lvl)
+                            }
+                        }
+                        .pickerStyle(SegmentedPickerStyle())
+                        Text(settingsVM.defaultCompressionLevel.subtitle)
+                            .font(.caption2)
+                            .foregroundColor(.secondary)
+                    }
+                    .padding(.vertical, 2)
+
+                    VStack(alignment: .leading, spacing: 6) {
+                        HStack {
+                            Text("Cloud Upload RAM Buffer")
+                                .font(.subheadline)
+                            Spacer()
+                            let resolvedMB = settingsVM.uploadBufferProfile.resolvedChunkSizeBytes() / 1_048_576
+                            Text("\(resolvedMB) MB chunks")
+                                .font(.caption.bold())
+                                .foregroundColor(.blue)
+                        }
+                        Picker("RAM Buffer", selection: $settingsVM.uploadBufferProfile) {
+                            ForEach(UploadBufferProfile.allCases) { prof in
+                                Text(prof.shortTitle).tag(prof)
+                            }
+                        }
+                        .pickerStyle(SegmentedPickerStyle())
+                        let headroomStr = ByteCountFormatter.string(fromByteCount: UploadBufferProfile.availableRAMHeadroomBytes(), countStyle: .memory)
+                        Text("Live Jetsam RAM headroom: \(headroomStr). Larger chunks cut Google Drive round-trips and overlap compression + Wi-Fi upload in parallel.")
+                            .font(.caption2)
+                            .foregroundColor(.secondary)
+                    }
+                    .padding(.vertical, 2)
 
                     Toggle("Include Caches by Default", isOn: $settingsVM.defaultIncludeCaches)
 
@@ -1096,7 +1138,7 @@ public struct RcloneConfSheet: View {
                         HStack {
                             Spacer()
                             Text("Parse & Save Remotes")
-                                .font(.body.weight(.semibold))
+                                .fontWeight(.semibold)
                             Spacer()
                         }
                     }

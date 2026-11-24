@@ -255,7 +255,7 @@ public final class GoogleDriveService: NSObject, ObservableObject, ASWebAuthenti
         cfg.urlCache = nil
         cfg.requestCachePolicy = .reloadIgnoringLocalCacheData
         cfg.httpShouldSetCookies = false
-        cfg.timeoutIntervalForRequest = 120
+        cfg.timeoutIntervalForRequest = 180
         cfg.timeoutIntervalForResource = 600
         cfg.waitsForConnectivity = false
         return URLSession(configuration: cfg, delegate: noRedirectDelegate, delegateQueue: nil)
@@ -880,7 +880,7 @@ public final class GoogleDriveService: NSObject, ObservableObject, ASWebAuthenti
 
             var request = URLRequest(url: sessionURL)
             request.httpMethod = "PUT"
-            request.timeoutInterval = 120
+            request.timeoutInterval = 180
             request.setValue("Bearer \(currentToken)", forHTTPHeaderField: "Authorization")
 
             let (data, response): (Data, URLResponse)

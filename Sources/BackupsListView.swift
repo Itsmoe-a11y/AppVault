@@ -542,9 +542,20 @@ struct CloudBackupCardView: View {
                     .cornerRadius(8)
 
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(file.name)
-                        .font(.headline)
-                        .lineLimit(1)
+                    HStack(spacing: 5) {
+                        Text(file.name)
+                            .font(.headline)
+                            .lineLimit(1)
+                        if let ver = BackupEngine.extractBackupVersion(from: file.name) {
+                            Text("v\(ver)")
+                                .font(.system(size: 10, weight: .bold, design: .monospaced))
+                                .padding(.horizontal, 5)
+                                .padding(.vertical, 1)
+                                .background(Color.blue.opacity(0.16))
+                                .foregroundColor(.blue)
+                                .cornerRadius(4)
+                        }
+                    }
 
                     Text("Google Drive \u{2022} \(folderName)")
                         .font(.caption2)
@@ -625,9 +636,20 @@ struct WebDAVBackupCardView: View {
                     .cornerRadius(8)
 
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(file.name)
-                        .font(.headline)
-                        .lineLimit(1)
+                    HStack(spacing: 5) {
+                        Text(file.name)
+                            .font(.headline)
+                            .lineLimit(1)
+                        if let ver = BackupEngine.extractBackupVersion(from: file.name) {
+                            Text("v\(ver)")
+                                .font(.system(size: 10, weight: .bold, design: .monospaced))
+                                .padding(.horizontal, 5)
+                                .padding(.vertical, 1)
+                                .background(Color.purple.opacity(0.16))
+                                .foregroundColor(.purple)
+                                .cornerRadius(4)
+                        }
+                    }
 
                     Text(serverURL)
                         .font(.caption2)
@@ -714,6 +736,15 @@ struct BackupCardView: View {
                         Text(record.appName)
                             .font(.headline)
                             .lineLimit(1)
+                        if let ver = BackupEngine.extractBackupVersion(from: record.archiveFileName) {
+                            Text("v\(ver)")
+                                .font(.system(size: 10, weight: .bold, design: .monospaced))
+                                .padding(.horizontal, 5)
+                                .padding(.vertical, 1)
+                                .background(Color.blue.opacity(0.16))
+                                .foregroundColor(.blue)
+                                .cornerRadius(4)
+                        }
                         if record.isEncrypted {
                             Image(systemName: "lock.fill")
                                 .font(.caption2)
